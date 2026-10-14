@@ -1,90 +1,136 @@
-
 # myCashflo
 
 > AI-powered accounts receivable and collections platform.
 
-## Applications
+## Applications & Services
 
-| App | Technology | Default Port |
-|---|---|---|
-| `apps/web` | React + Vite + TypeScript + Tailwind CSS | 5173 |
-| `apps/mobile` | Flutter + Dart (Phase 4) | — |
-| `services/api` | NestJS + PostgreSQL + Prisma | 3000 |
-| `services/voice-agent` | Python + LiveKit (Phase 5) | — |
+| App / Service | Technology | Default Port / Target | Status |
+|---|---|---|---|
+| `services/api` | NestJS + PostgreSQL + Prisma | `http://localhost:3000/api` | ✅ Operational |
+| `apps/web` | React 19 + Vite + TypeScript + Tailwind CSS | `http://localhost:5173` | ✅ Operational |
+| `apps/mobile` | Flutter 3.x + Dart + GoRouter + Dio | Android, iOS, Windows, Web | ✅ Operational |
+| `services/voice-agent` | Python 3.10+ + LiveKit | CLI / WebRTC Agent | ✅ Operational |
 
-## Quick Start
+---
 
-### Step 1 — Clone and install deps
+## Demo Credentials
 
-```powershell
-# From the repo root
-cd services/api && npm install
-cd ../../apps/web && npm install
-```
+The database has been seeded with demo tenant data:
 
-### Step 2 — Configure the API
+- **Admin Account**: `admin@democorp.in`
+- **Password**: `Admin@1234`
+- **Agent Account**: `agent@democorp.in`
+- **Password**: `Agent@1234`
+
+---
+
+## How to Run
+
+### 1. Run the Backend API (NestJS)
+
+Ensure PostgreSQL is running locally (or via your cloud `DATABASE_URL` in `services/api/.env`):
 
 ```powershell
 cd services/api
-Copy-Item .env.example .env
-# Edit .env: fill in DATABASE_URL and JWT secrets
-# See docs/DECISIONS.md for PostgreSQL setup on Windows
-```
-
-### Step 3 — Run in development
-
-```powershell
-# Terminal 1 — NestJS API
-cd services/api
+npm install
 npm run start:dev
-# API: http://localhost:3000/api
-# Swagger: http://localhost:3000/api/docs
-# Health: http://localhost:3000/api/health
-
-# Terminal 2 — React Web App
-cd apps/web
-npm run dev
-# Web: http://localhost:5173
 ```
 
-> **Note:** Phase 2 database setup (PostgreSQL + Prisma migration) is required before the API can serve real data.
-> Until then, the web app runs in demo mode with clearly labelled seed data.
+- **API Base URL**: [http://localhost:3000/api](http://localhost:3000/api)
+- **Interactive Swagger Docs**: [http://localhost:3000/api/docs](http://localhost:3000/api/docs)
+- **Health Check**: [http://localhost:3000/api/health](http://localhost:3000/api/health)
 
-## Project Status
+---
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full phase-by-phase status.
+### 2. Run the React Web App
 
-| Phase | Status |
-|---|---|
-| Phase 0 — Repository Inspection | ✅ Complete |
-| Phase 1 — Project Foundation | ✅ Complete |
-| Phase 2 — Database and Backend | 🔜 Pending (needs PostgreSQL) |
-| Phase 3 — Web App + Backend Connection | 🔜 Pending |
-| Phase 4 — Flutter Mobile App | 🔜 Pending (needs Flutter SDK) |
-| Phase 5 — Chotu AI Voice Prototype | 🔜 Pending (needs LiveKit + AI key) |
-| Phase 6 — Collections Intelligence | 🔜 Pending |
-| Phase 7 — Integrations | 🔜 Pending |
-| Phase 8 — Final Verification | 🔜 Pending |
+In a separate terminal:
 
-## Prerequisites
+```powershell
+cd apps/web
+npm install
+npm run dev
+```
 
-| Tool | Required for | Install link |
-|---|---|---|
-| Node.js 20+ | API and Web | https://nodejs.org |
-| PostgreSQL 15+ | Phase 2 | https://postgresql.org/download/windows |
-| Flutter SDK 3.x | Phase 4 | https://flutter.dev/docs/get-started/install/windows |
-| Python 3.10+ | Phase 5 | https://python.org/downloads |
-| LiveKit account | Phase 5 | https://cloud.livekit.io (free tier) |
+- **Web App**: [http://localhost:5173](http://localhost:5173)
+- Vite automatically proxies `/api` calls to `http://localhost:3000`.
+
+---
+
+### 3. Run the Flutter Mobile App
+
+In a separate terminal:
+
+```powershell
+cd apps/mobile
+flutter pub get
+flutter run
+```
+
+You can choose your target device (Chrome, Windows desktop, Android emulator, or iOS simulator).
+
+To run specifically on Chrome or Windows:
+```powershell
+flutter run -d chrome
+# or
+flutter run -d windows
+```
+
+---
+
+### 4. Run the Chotu AI Voice Agent
+
+In a separate terminal:
+
+#### Interactive CLI Simulation (No extra setup needed)
+```powershell
+cd services/voice-agent
+python agent.py --simulate
+```
+
+#### Production LiveKit Mode
+```powershell
+cd services/voice-agent
+pip install -r requirements.txt
+Copy-Item .env.example .env
+# Edit .env with your LiveKit and OpenAI API credentials
+python agent.py
+```
+
+---
+
+## Running Automated Tests
+
+```powershell
+# API tests (Vitest + e2e)
+cd services/api
+npm run test
+npm run test:e2e
+
+# Web build & typecheck
+cd apps/web
+npm run build
+
+# Flutter analysis & tests
+cd apps/mobile
+flutter analyze
+flutter test
+
+# Python agent tests
+cd services/voice-agent
+python -m unittest test_agent.py
+```
+
+---
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Roadmap](docs/ROADMAP.md)
+- [Architecture Overview](docs/ARCHITECTURE.md)
+- [Development Roadmap](docs/ROADMAP.md)
 - [Technical Decisions](docs/DECISIONS.md)
 
 ## Security
 
-- Never commit `.env` files, API keys, credentials, or private signing keys.
-- The `.gitignore` excludes all `.env` files (except `.env.example`).
-- All tenant data is isolated at the database query level.
-- Voice tokens are issued server-side and expire after a short window.
+- Never commit `.env` files or API secrets.
+- Multi-tenant row-level isolation is enforced on every query via `tenantId`.
+- Access tokens expire periodically with refresh token rotation.

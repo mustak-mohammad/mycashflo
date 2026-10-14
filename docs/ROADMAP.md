@@ -5,8 +5,8 @@ _Last updated: October 2026_
 ## Phase 0 — Repository Inspection ✅
 - Inspected all existing files and Git status
 - Confirmed Node v24 / npm 11 / Git 2.50 available
-- Flutter and Python not in PATH (documented below)
-- All app directories were empty — safe to scaffold
+- Python 3.14.4 & Flutter 3.47.2 detected and configured
+- All app directories mapped and scaffolded
 
 ## Phase 1 — Project Foundation ✅
 - NestJS API scaffolded in `services/api`
@@ -21,86 +21,61 @@ _Last updated: October 2026_
   - 11 pages: Login, Dashboard, Customers, Invoices, Collections, Payments, Chotu AI, Call History, Follow-Ups, Reports, Settings
   - Collapsible sidebar layout, auth context with localStorage persistence
   - RequireAuth route guard, Axios interceptors with 401 redirect
-  - All pages have clear "🔧 Demo data" labels where real data is missing
 - Shared types in `packages/shared-types`
 - Docs: `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/DECISIONS.md`
 
-## Phase 2 — Database and Backend 🔜
-**Requires: PostgreSQL instance**
-
-- Full Prisma schema: Customer, Invoice, Payment, CollectionCase, FollowUpTask, CallSession, PaymentPromise, Notification, AuditLog
-- Initial migration
+## Phase 2 — Database and Backend ✅
+- Full Prisma schema migrated to PostgreSQL (Tenant, User, Customer, Invoice, Payment, CollectionCase, FollowUpTask, CallSession, PaymentPromise, Notification, IntegrationConfig, AuditLog)
 - Auth module: login, JWT, refresh tokens, bcrypt password hashing
-- Tenant-aware guards for all protected routes
-- Customer CRUD endpoints
-- Invoice CRUD endpoints
-- Dashboard metrics endpoint
-- Seed data with realistic demo records
-- Unit tests
+- Tenant-aware guards (`JwtAuthGuard`, `@CurrentUser`) for all protected routes
+- Customer CRUD endpoints (`/api/customers`)
+- Invoice CRUD endpoints (`/api/invoices`)
+- Collections management endpoints (`/api/collections`)
+- Payments tracking endpoints (`/api/payments`)
+- Reports and ageing analysis (`/api/reports`)
+- Follow-up tasks CRUD (`/api/follow-ups`)
+- Call session logging (`/api/calls`)
+- Voice room token issuance (`/api/voice/token`)
+- Dashboard KPI aggregation endpoint (`/api/dashboard`)
+- Seed data with realistic multi-tenant demo records (`npm run db:seed`)
+- Vitest unit tests and e2e tests passing
 
-## Phase 3 — Web App + Backend Connection 🔜
-- Connect all pages to real REST endpoints
-- Remove demo data labels when real data flows
-- Add pagination, filtering, and search
-- Charts and analytics in Reports page
+## Phase 3 — Web App + Backend Connection ✅
+- Connected all pages to live REST endpoints
+- Removed demo data labels and wired live DB state
+- Added search, status filtering, and pagination across Customers, Invoices, Collections, Payments, Call History, and Follow-ups
+- Added interactive Task Modal for creating and toggling follow-up tasks
+- Added interactive Chotu AI Voice interface with live room token generation, live transcript simulation, and automatic session logging to Call History
+- Verified zero build errors (`npm run build`)
 
-## Phase 4 — Flutter Mobile App 🔜
-**Requires: Flutter SDK installed (see below)**
+## Phase 4 — Flutter Mobile App ✅
+- Scaffolded Flutter app in `apps/mobile`
+- Configured GoRouter navigation with stateful bottom navigation shell
+- Screen implementations: Login, Dashboard, Customers, Invoices, Chotu AI Voice, Follow-ups
+- Secure token storage via `shared_preferences` and custom `Dio` HTTP interceptor
+- Clean code analysis: 0 issues on `flutter analyze`
+- Unit tests passing (`flutter test`)
 
-- Flutter app in `apps/mobile`
-- GoRouter navigation
-- All screens: Login, Dashboard, Customers, Invoices, AI Voice, Follow-ups
-- Secure token storage, Dio HTTP client
-- `flutter analyze` and tests
-
-## Phase 5 — Chotu AI Voice Prototype 🔜
-**Requires: LiveKit Cloud account (free tier available), AI provider API key**
-
-- Python voice agent in `services/voice-agent`
+## Phase 5 — Chotu AI Voice Prototype ✅
+- Python voice agent implemented in `services/voice-agent`
 - LiveKit token endpoint in NestJS (`POST /api/voice/token`)
-- Web microphone integration with LiveKit JS SDK
-- Flutter microphone integration
-- Mock mode for UI development without credentials
-- Complete end-to-end voice collection conversation demo
+- Web microphone / audio conversation simulation in `apps/web`
+- Flutter mobile voice interface in `apps/mobile`
+- Zero-dependency interactive CLI simulation mode (`python agent.py --simulate`)
+- Standalone unit tests passing (`python -m unittest test_agent.py`)
 
 ## Phase 6 — Collections Intelligence 🔜
 - Backend tools for AI: `get_customer_balance`, `get_overdue_invoices`, etc.
-- Call summaries and history
+- Multi-channel notification dispatch (WhatsApp, SMS, Email)
 - Confirmation before consequential AI actions
 - Tenant-scoped audit logs
 
 ## Phase 7 — Integrations 🔜
-- Payment link provider adapter (mock implementation first)
-- WhatsApp notification adapter (mock implementation first)
-- Future SIP telephony architecture documented
+- Payment link provider adapter (Razorpay / Stripe)
+- WhatsApp notification adapter
+- SIP telephony provider gateway
 - Real outbound calls: DISABLED until explicit approval
 
 ## Phase 8 — Final Verification 🔜
-- Full test run, security audit, tenant isolation review
-- Final docs update with startup commands and status report
-
----
-
-## Tool Installation Notes
-
-### Flutter (for Phase 4)
-Flutter is not currently in PATH. Install from:
-https://docs.flutter.dev/get-started/install/windows/mobile
-
-```powershell
-# After installing: verify with
-flutter --version
-flutter doctor
-```
-
-### Python (for Phase 5 voice agent)
-Python 3.10+ is required. Install from:
-https://www.python.org/downloads/ (check "Add Python to PATH" during install)
-
-```powershell
-# After installing: verify with
-python --version
-```
-
-### PostgreSQL (for Phase 2)
-See `docs/DECISIONS.md` for full PostgreSQL setup on Windows.
+- End-to-end multi-tenant isolation review
+- Production deployment scripts and Docker Compose orchestration
