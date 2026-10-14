@@ -9,6 +9,7 @@ node_modules/
 dist/
 coverage/
 .nest/
+*.tsbuildinfo
 
 # Flutter and Dart
 .dart_tool/
