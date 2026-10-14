@@ -35,12 +35,19 @@ export default function VoicePage() {
   const animFrameRef = useRef<number | null>(null)
 
   useEffect(() => {
-    customersApi.list({ limit: 10 }).then((res) => {
-      setCustomers(res.data)
-      if (res.data.length > 0) {
-        setSelectedCustomerId(res.data[0].id)
-      }
-    }).catch(console.error)
+    customersApi
+      .list({ limit: 10 })
+      .then((res) => {
+        const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : []
+        setCustomers(list)
+        if (list.length > 0) {
+          setSelectedCustomerId(list[0].id)
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load customers for voice assistant', err)
+        setCustomers([])
+      })
   }, [])
 
   useEffect(() => {
@@ -87,7 +94,8 @@ export default function VoicePage() {
     setAudioLevel(0)
   }
 
-  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId)
+  const customerList = Array.isArray(customers) ? customers : []
+  const selectedCustomer = customerList.find((c) => c.id === selectedCustomerId)
 
   function speakText(text: string) {
     if ('speechSynthesis' in window) {
@@ -304,14 +312,18 @@ export default function VoicePage() {
             <select
               value={selectedCustomerId}
               onChange={(e) => setSelectedCustomerId(e.target.value)}
-              disabled={status === 'active' || status === 'connecting'}
+              disabled={status === 'active' || status === 'connecting' || customerList.length === 0}
               className="px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 min-w-60 focus:outline-none focus:border-indigo-500"
             >
-              {customers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} — ₹{Number(c.outstandingBalance).toLocaleString('en-IN')} overdue
-                </option>
-              ))}
+              {customerList.length > 0 ? (
+                customerList.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} — ₹{Number(c.outstandingBalance || 0).toLocaleString('en-IN')} overdue
+                  </option>
+                ))
+              ) : (
+                <option value="">No customer accounts found</option>
+              )}
             </select>
           </div>
           {selectedCustomer && (

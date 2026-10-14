@@ -3,6 +3,7 @@ import { Suspense, lazy } from 'react'
 import { AppLayout } from './components/layout/AppLayout'
 import { RequireAuth } from './components/auth/RequireAuth'
 import { AuthProvider } from './store/AuthContext'
+import { ErrorBoundary } from './components/ui/ErrorBoundary'
 
 // Lazy-load pages for better performance
 const LoginPage = lazy(() => import('./pages/LoginPage'))
@@ -30,30 +31,32 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Suspense fallback={<PageLoader />}>
-          <Routes>
-            {/* Public */}
-            <Route path="/login" element={<LoginPage />} />
+          <ErrorBoundary>
+            <Routes>
+              {/* Public */}
+              <Route path="/login" element={<LoginPage />} />
 
-            {/* Protected */}
-            <Route element={<RequireAuth />}>
-              <Route element={<AppLayout />}>
-                <Route index element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<DashboardPage />} />
-                <Route path="/customers" element={<CustomersPage />} />
-                <Route path="/invoices" element={<InvoicesPage />} />
-                <Route path="/collections" element={<CollectionsPage />} />
-                <Route path="/payments" element={<PaymentsPage />} />
-                <Route path="/voice" element={<VoicePage />} />
-                <Route path="/calls" element={<CallHistoryPage />} />
-                <Route path="/follow-ups" element={<FollowUpPage />} />
-                <Route path="/reports" element={<ReportsPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
+              {/* Protected */}
+              <Route element={<RequireAuth />}>
+                <Route element={<AppLayout />}>
+                  <Route index element={<Navigate to="/dashboard" replace />} />
+                  <Route path="/dashboard" element={<DashboardPage />} />
+                  <Route path="/customers" element={<CustomersPage />} />
+                  <Route path="/invoices" element={<InvoicesPage />} />
+                  <Route path="/collections" element={<CollectionsPage />} />
+                  <Route path="/payments" element={<PaymentsPage />} />
+                  <Route path="/voice" element={<VoicePage />} />
+                  <Route path="/calls" element={<CallHistoryPage />} />
+                  <Route path="/follow-ups" element={<FollowUpPage />} />
+                  <Route path="/reports" element={<ReportsPage />} />
+                  <Route path="/settings" element={<SettingsPage />} />
+                </Route>
               </Route>
-            </Route>
 
-            {/* Catch-all */}
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
-          </Routes>
+              {/* Catch-all */}
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            </Routes>
+          </ErrorBoundary>
         </Suspense>
       </BrowserRouter>
     </AuthProvider>

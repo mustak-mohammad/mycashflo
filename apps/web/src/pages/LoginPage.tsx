@@ -25,6 +25,7 @@ export default function LoginPage() {
   const {
     register,
     handleSubmit,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<FormData>({ resolver: zodResolver(schema) })
 
@@ -318,6 +319,40 @@ export default function LoginPage() {
                 : 'Sign in to Workspace'}
             </button>
           </form>
+
+          {/* Quick Demo Switcher */}
+          {!isSignUp && (
+            <div className="mt-5 p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+              <div className="text-slate-400 font-medium mb-2 flex items-center justify-between">
+                <span>Quick Demo Accounts (1-Click Fill):</span>
+                <span className="text-[10px] text-slate-500">Includes seeded demo data</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setValue('email', 'admin@democorp.in')
+                    setValue('password', 'Admin@1234')
+                  }}
+                  className="p-2 rounded-lg bg-indigo-950/60 border border-indigo-800/60 text-indigo-200 hover:bg-indigo-900/80 text-left transition-colors cursor-pointer"
+                >
+                  <div className="font-semibold text-white">Priya Sharma</div>
+                  <div className="text-[10px] text-indigo-300">Admin · Demo Corp</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setValue('email', 'agent@democorp.in')
+                    setValue('password', 'Agent@1234')
+                  }}
+                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 text-left transition-colors cursor-pointer"
+                >
+                  <div className="font-semibold text-white">Rahul Verma</div>
+                  <div className="text-[10px] text-slate-400">Agent · Demo Corp</div>
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Toggle between Sign In and Sign Up */}
           <div className="mt-6 text-center text-xs">
