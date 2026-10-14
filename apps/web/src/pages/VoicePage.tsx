@@ -23,8 +23,16 @@ export default function VoicePage() {
   const [callSummary, setCallSummary] = useState<string>('')
   const [outcome, setOutcome] = useState<'PROMISE_TO_PAY' | 'RESOLVED' | 'NO_CONTACT' | 'DISPUTE'>('PROMISE_TO_PAY')
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false)
+  const [micActive, setMicActive] = useState<boolean>(false)
+  const [audioLevel, setAudioLevel] = useState<number>(0)
+  const [isListening, setIsListening] = useState<boolean>(false)
+  const [manualInput, setManualInput] = useState<string>('')
 
   const timerRef = useRef<any>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const recognitionRef = useRef<any>(null)
+  const animFrameRef = useRef<number | null>(null)
 
   useEffect(() => {
     customersApi.list({ limit: 10 }).then((res) => {
@@ -48,7 +56,148 @@ export default function VoicePage() {
     }
   }, [status])
 
+  // Clean up media on unmount
+  useEffect(() => {
+    return () => {
+      stopMediaStream()
+    }
+  }, [])
+
+  function stopMediaStream() {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop())
+      mediaStreamRef.current = null
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close().catch(() => {})
+      audioContextRef.current = null
+    }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop()
+      } catch (_) {}
+      recognitionRef.current = null
+    }
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current)
+      animFrameRef.current = null
+    }
+    setMicActive(false)
+    setIsListening(false)
+    setAudioLevel(0)
+  }
+
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId)
+
+  function speakText(text: string) {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+      const utterance = new SpeechSynthesisUtterance(text)
+      utterance.rate = 1.0
+      utterance.pitch = 1.0
+      window.speechSynthesis.speak(utterance)
+    }
+  }
+
+  function handleAgentReply(userUtterance: string) {
+    const textLower = userUtterance.toLowerCase()
+    const custName = selectedCustomer?.name ?? 'Customer'
+    let reply = ''
+    let newOutcome: 'PROMISE_TO_PAY' | 'RESOLVED' | 'NO_CONTACT' | 'DISPUTE' = outcome
+
+    if (textLower.includes('friday') || textLower.includes('monday') || textLower.includes('tomorrow') || textLower.includes('pay') || textLower.includes('transfer')) {
+      newOutcome = 'PROMISE_TO_PAY'
+      reply = `Thank you for confirming, ${custName}. I have recorded your commitment to pay. You will receive an acknowledgment confirmation shortly.`
+    } else if (textLower.includes('dispute') || textLower.includes('wrong') || textLower.includes('incorrect') || textLower.includes('not received')) {
+      newOutcome = 'DISPUTE'
+      reply = `I understand there may be an item under review, ${custName}. I have flagged this invoice for immediate account reconciliation with our billing team.`
+    } else if (textLower.includes('busy') || textLower.includes('later') || textLower.includes('driving')) {
+      newOutcome = 'NO_CONTACT'
+      reply = `Understood. I will schedule a follow-up reminder to reach out at a more convenient time later today.`
+    } else {
+      reply = `Understood. Regarding your outstanding balance, could you specify an estimated date when we can expect the remittance?`
+    }
+
+    setOutcome(newOutcome)
+    const timeStr = new Date().toTimeString().slice(3, 8)
+    setTranscript((prev) => [
+      ...prev,
+      { speaker: 'agent', text: reply, time: timeStr },
+    ])
+    speakText(reply)
+  }
+
+  async function startMicrophone() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStreamRef.current = stream
+      setMicActive(true)
+
+      // Audio analysis for live visual pulse
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+      if (AudioCtx) {
+        const audioCtx = new AudioCtx()
+        audioContextRef.current = audioCtx
+        const source = audioCtx.createMediaStreamSource(stream)
+        const analyser = audioCtx.createAnalyser()
+        analyser.fftSize = 64
+        source.connect(analyser)
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount)
+        const updateVolume = () => {
+          analyser.getByteFrequencyData(dataArray)
+          let sum = 0
+          for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i]
+          }
+          const avg = sum / dataArray.length
+          setAudioLevel(Math.min(100, Math.round((avg / 128) * 100)))
+          animFrameRef.current = requestAnimationFrame(updateVolume)
+        }
+        updateVolume()
+      }
+
+      // Web Speech Recognition
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition()
+        recognition.continuous = true
+        recognition.interimResults = false
+        recognition.lang = 'en-IN'
+
+        recognition.onresult = (event: any) => {
+          const lastIdx = event.results.length - 1
+          const userSpeech = event.results[lastIdx][0].transcript.trim()
+          if (userSpeech) {
+            const timeStr = new Date().toTimeString().slice(3, 8)
+            setTranscript((prev) => [
+              ...prev,
+              { speaker: 'customer', text: userSpeech, time: timeStr },
+            ])
+            handleAgentReply(userSpeech)
+          }
+        }
+
+        recognition.onstart = () => setIsListening(true)
+        recognition.onend = () => {
+          if (status === 'active') {
+            try {
+              recognition.start()
+            } catch (_) {}
+          } else {
+            setIsListening(false)
+          }
+        }
+        recognition.onerror = () => setIsListening(false)
+
+        recognition.start()
+        recognitionRef.current = recognition
+      }
+    } catch (err) {
+      console.warn('Microphone access not granted or not supported:', err)
+      setMicActive(false)
+    }
+  }
 
   async function handleStart() {
     setStatus('connecting')
@@ -62,20 +211,24 @@ export default function VoicePage() {
       })
       setSessionToken(tokenData)
 
-      setTimeout(() => {
-        setStatus('active')
-        const custName = selectedCustomer?.name ?? 'Customer'
-        const bal = selectedCustomer?.outstandingBalance ? `₹${selectedCustomer.outstandingBalance.toLocaleString('en-IN')}` : 'outstanding balance'
+      setStatus('active')
+      const custName = selectedCustomer?.name ?? 'Customer'
+      const bal = selectedCustomer?.outstandingBalance
+        ? `₹${Number(selectedCustomer.outstandingBalance).toLocaleString('en-IN')}`
+        : 'outstanding balance'
 
-        setTranscript([
-          { speaker: 'system', text: `Connected to room: ${tokenData.roomName}`, time: '00:01' },
-          { speaker: 'agent', text: `Namaste! Am I speaking with the finance team at ${custName}? This is Chotu calling from myCashflo.`, time: '00:03' },
-          { speaker: 'customer', text: `Yes, speaking. How can I help you?`, time: '00:08' },
-          { speaker: 'agent', text: `I am following up on invoice payment of ${bal}. Could you confirm when the payment will be processed?`, time: '00:14' },
-          { speaker: 'customer', text: `We are processing our vendor cycle this Friday. You should receive the funds by Friday evening.`, time: '00:22' },
-          { speaker: 'agent', text: `Thank you for the update! I have noted a promise-to-pay date for Friday. Have a great day!`, time: '00:29' },
-        ])
-      }, 1200)
+      const greeting = `Namaste! Am I speaking with the accounts department at ${custName}? This is Chotu calling from myCashflo regarding pending invoice balance of ${bal}.`
+
+      setTranscript([
+        { speaker: 'system', text: `LiveKit Room session token issued: ${tokenData.roomName}`, time: '00:01' },
+        { speaker: 'agent', text: greeting, time: '00:02' },
+      ])
+
+      // Speak greeting via Web Speech Synthesis
+      speakText(greeting)
+
+      // Start actual microphone capture & SpeechRecognition
+      await startMicrophone()
     } catch (err) {
       console.error(err)
       setStatus('error')
@@ -83,9 +236,15 @@ export default function VoicePage() {
   }
 
   async function handleEnd() {
+    stopMediaStream()
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel()
+    }
+
     setStatus('completed')
-    const finalDuration = duration || 32
-    const summaryText = `Customer confirmed payment release for Friday vendor cycle. Noted promise to pay.`
+    const finalDuration = duration || 25
+    const custName = selectedCustomer?.name ?? 'Customer'
+    const summaryText = `Call conducted with ${custName}. Outcome: ${outcome}. Total duration: ${formatSec(finalDuration)}.`
     setCallSummary(summaryText)
 
     try {
@@ -104,10 +263,24 @@ export default function VoicePage() {
   }
 
   function handleReset() {
+    stopMediaStream()
     setStatus('idle')
     setDuration(0)
     setTranscript([])
     setSavedSuccess(false)
+  }
+
+  function handleSendManualMessage(e: React.FormEvent) {
+    e.preventDefault()
+    if (!manualInput.trim()) return
+    const text = manualInput.trim()
+    setManualInput('')
+    const timeStr = new Date().toTimeString().slice(3, 8)
+    setTranscript((prev) => [
+      ...prev,
+      { speaker: 'customer', text, time: timeStr },
+    ])
+    handleAgentReply(text)
   }
 
   const formatSec = (s: number) => {
@@ -120,7 +293,7 @@ export default function VoicePage() {
     <div className="p-6 max-w-4xl mx-auto">
       <PageHeader
         title="Chotu AI Voice Assistant"
-        subtitle="Real-time AI-powered collection conversations with LiveKit protocol"
+        subtitle="Real-time AI-powered collection conversations with LiveKit protocol and microphone speech recognition"
       />
 
       {/* Target Customer Selection */}
@@ -152,18 +325,21 @@ export default function VoicePage() {
 
       {/* Voice interface */}
       <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        {/* Agent avatar */}
+        {/* Agent avatar with dynamic audio scale */}
         <div className="flex items-center justify-center mb-6">
           <div
-            className="flex items-center justify-center rounded-full text-5xl transition-all duration-300"
+            className="flex items-center justify-center rounded-full text-5xl transition-all duration-100"
             style={{
               width: 120,
               height: 120,
+              transform: status === 'active' ? `scale(${1.0 + (audioLevel / 300)})` : 'scale(1)',
               background: status === 'active'
                 ? 'linear-gradient(135deg, #6366f1, #818cf8)'
                 : 'var(--surface-2)',
               border: `3px solid ${status === 'active' ? 'var(--primary)' : 'var(--border)'}`,
-              boxShadow: status === 'active' ? '0 0 40px rgba(99,102,241,0.4)' : 'none',
+              boxShadow: status === 'active'
+                ? `0 0 ${20 + audioLevel / 2}px rgba(99,102,241,${0.4 + audioLevel / 200})`
+                : 'none',
             }}
           >
             🤖
@@ -172,25 +348,33 @@ export default function VoicePage() {
 
         <h2 className="text-xl font-bold text-white mb-1">Chotu AI Collection Agent</h2>
         <p className="text-sm mb-4" style={{ color: 'var(--text-muted)' }}>
-          {status === 'idle' && 'Ready to connect live collection call'}
+          {status === 'idle' && 'Ready to connect live collection call with microphone and speech recognition'}
           {status === 'connecting' && 'Negotiating LiveKit room session token…'}
           {status === 'active' && `Call in progress (${formatSec(duration)})`}
           {status === 'completed' && 'Call ended — summary saved'}
           {status === 'error' && 'Connection failed — please retry'}
         </p>
 
-        {/* Status indicator */}
-        <div className="flex items-center justify-center gap-2 mb-8">
-          <div
-            className="w-2.5 h-2.5 rounded-full"
-            style={{
-              background: status === 'active' ? 'var(--accent)' : status === 'error' ? 'var(--danger)' : 'var(--border)',
-              animation: status === 'active' ? 'pulse 2s infinite' : 'none',
-            }}
-          />
-          <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-            {status === 'active' ? 'Live Room Active' : status === 'connecting' ? 'Connecting' : status === 'completed' ? 'Logged' : 'Standby'}
-          </span>
+        {/* Live Status Indicators */}
+        <div className="flex flex-wrap items-center justify-center gap-3 mb-6">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
+            <span className={`w-2 h-2 rounded-full ${status === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+            <span className="text-slate-300">{status === 'active' ? 'Live Room Active' : 'Standby'}</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
+            <span className="text-slate-400">🎙️ Mic:</span>
+            <span className={micActive ? 'text-emerald-400 font-semibold' : 'text-slate-400'}>
+              {micActive ? `Active (${audioLevel}%)` : 'Ready'}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
+            <span className="text-slate-400">🗣️ Speech Engine:</span>
+            <span className={isListening ? 'text-indigo-400 font-semibold animate-pulse' : 'text-slate-400'}>
+              {isListening ? 'Listening' : 'Web Speech API'}
+            </span>
+          </div>
         </div>
 
         {/* Controls */}
@@ -200,7 +384,7 @@ export default function VoicePage() {
             className="px-8 py-3 rounded-xl text-white font-semibold text-sm cursor-pointer transition-all duration-150"
             style={{ background: 'var(--primary)', border: 'none' }}
           >
-            🎙️ Start Voice Session
+            🎙️ Start Voice Session (Microphone Enabled)
           </button>
         ) : status === 'active' ? (
           <button
@@ -255,14 +439,17 @@ export default function VoicePage() {
           </div>
         )}
 
-        {/* Transcript Area */}
+        {/* Live Transcript Area */}
         {(status === 'active' || status === 'completed') && (
           <div className="mt-8 rounded-xl p-5 text-left text-sm" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
             <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-semibold tracking-wider uppercase text-slate-400">Live Transcript & Audio Log</span>
+              <span className="text-xs font-semibold tracking-wider uppercase text-slate-400">
+                Live Transcript & Microphone Log
+              </span>
               <span className="text-xs font-mono text-slate-400">{formatSec(duration)}</span>
             </div>
-            <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1">
+
+            <div className="space-y-2.5 max-h-64 overflow-y-auto pr-1 mb-3">
               {transcript.map((m, i) => (
                 <div
                   key={i}
@@ -276,13 +463,32 @@ export default function VoicePage() {
                 >
                   {m.speaker !== 'system' && (
                     <div className="font-semibold mb-0.5 text-[10px] text-slate-400 uppercase">
-                      {m.speaker === 'agent' ? '🤖 Chotu AI' : '👤 Customer'} · {m.time}
+                      {m.speaker === 'agent' ? '🤖 Chotu AI' : '👤 You (Customer)'} · {m.time}
                     </div>
                   )}
                   {m.text}
                 </div>
               ))}
             </div>
+
+            {/* Optional text input fallback for testing without voice speaking */}
+            {status === 'active' && (
+              <form onSubmit={handleSendManualMessage} className="flex gap-2 pt-2 border-t border-slate-700/60">
+                <input
+                  type="text"
+                  placeholder="Or type a reply to Chotu (e.g. 'We will pay this Friday')…"
+                  value={manualInput}
+                  onChange={(e) => setManualInput(e.target.value)}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-indigo-500"
+                />
+                <button
+                  type="submit"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-indigo-600 hover:bg-indigo-500 cursor-pointer"
+                >
+                  Send
+                </button>
+              </form>
+            )}
           </div>
         )}
       </div>
