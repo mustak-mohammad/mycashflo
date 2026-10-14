@@ -1,0 +1,383 @@
+// myCashflo — Full Prisma Schema (Phase 2)
+// Run after filling in DATABASE_URL in .env:
+//   npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Tenant (Company) ─────────────────────────────────────────────────────────
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users            User[]
+  customers        Customer[]
+  invoices         Invoice[]
+  payments         Payment[]
+  collectionCases  CollectionCase[]
+  followUpTasks    FollowUpTask[]
+  callSessions     CallSession[]
+  notifications    Notification[]
+  integrationCfgs  IntegrationConfig[]
+  auditLogs        AuditLog[]
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(cuid())
+  email        String
+  passwordHash String
+  name         String
+  role         UserRole @default(AGENT)
+  isActive     Boolean  @default(true)
+  tenantId     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  collectionCases CollectionCase[]
+  followUpTasks   FollowUpTask[]
+  callSessions    CallSession[]
+  auditLogs       AuditLog[]
+
+  @@unique([email, tenantId])
+  @@index([tenantId])
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  AGENT
+}
+
+// ── Refresh Tokens ─────────────────────────────────────────────────────────────
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+// ── Customers ─────────────────────────────────────────────────────────────────
+model Customer {
+  id                 String         @id @default(cuid())
+  name               String
+  email              String
+  phone              String
+  company            String?
+  gstNumber          String?
+  billingAddress     String?
+  outstandingBalance Decimal        @default(0) @db.Decimal(19, 4)
+  currency           String         @default("INR")
+  status             CustomerStatus @default(ACTIVE)
+  notes              String?
+  tenantId           String
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoices        Invoice[]
+  payments        Payment[]
+  collectionCases CollectionCase[]
+  notifications   Notification[]
+  callSessions    CallSession[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+// ── Invoices ──────────────────────────────────────────────────────────────────
+model Invoice {
+  id          String        @id @default(cuid())
+  number      String
+  customerId  String
+  amount      Decimal       @db.Decimal(19, 4)
+  outstanding Decimal       @default(0) @db.Decimal(19, 4)
+  currency    String        @default("INR")
+  status      InvoiceStatus @default(DRAFT)
+  description String?
+  issueDate   DateTime
+  dueDate     DateTime
+  tenantId    String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id])
+  payments        Payment[]
+  collectionCases CollectionCase[]
+  paymentPromises PaymentPromise[]
+
+  @@unique([number, tenantId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([customerId])
+  @@index([dueDate])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+// ── Payments ──────────────────────────────────────────────────────────────────
+model Payment {
+  id            String        @id @default(cuid())
+  ref           String        @unique
+  customerId    String
+  invoiceId     String
+  amount        Decimal       @db.Decimal(19, 4)
+  currency      String        @default("INR")
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  providerRef   String?       // External payment provider reference
+  paidAt        DateTime?
+  notes         String?
+  tenantId      String
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id])
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([invoiceId])
+}
+
+enum PaymentMethod {
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  CASH
+  CARD
+  PAYMENT_LINK
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// ── Collection Cases ──────────────────────────────────────────────────────────
+model CollectionCase {
+  id          String           @id @default(cuid())
+  customerId  String
+  invoiceId   String?
+  assignedTo  String?          // User.id of the assigned agent
+  priority    CasePriority     @default(MEDIUM)
+  status      CaseStatus       @default(OPEN)
+  notes       String?
+  resolvedAt  DateTime?
+  tenantId    String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer         @relation(fields: [customerId], references: [id])
+  invoice         Invoice?         @relation(fields: [invoiceId], references: [id])
+  assignedAgent   User?            @relation(fields: [assignedTo], references: [id])
+  followUpTasks   FollowUpTask[]
+  paymentPromises PaymentPromise[]
+  callSessions    CallSession[]
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([assignedTo])
+}
+
+enum CasePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum CaseStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// ── Follow-Up Tasks ───────────────────────────────────────────────────────────
+model FollowUpTask {
+  id               String       @id @default(cuid())
+  collectionCaseId String?
+  customerId       String?
+  assignedTo       String?
+  title            String
+  description      String?
+  dueDate          DateTime
+  priority         CasePriority @default(MEDIUM)
+  done             Boolean      @default(false)
+  completedAt      DateTime?
+  tenantId         String
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
+  assignedAgent  User?           @relation(fields: [assignedTo], references: [id])
+
+  @@index([tenantId])
+  @@index([assignedTo])
+  @@index([dueDate])
+}
+
+// ── Call Sessions (Chotu AI) ──────────────────────────────────────────────────
+model CallSession {
+  id               String        @id @default(cuid())
+  collectionCaseId String?
+  customerId       String?
+  userId           String        // agent who initiated
+  livekitRoom      String?
+  duration         Int?          // seconds
+  outcome          CallOutcome?
+  transcript       String?       @db.Text
+  summary          String?       @db.Text
+  startedAt        DateTime      @default(now())
+  endedAt          DateTime?
+  tenantId         String
+  createdAt        DateTime      @default(now())
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer       Customer?       @relation(fields: [customerId], references: [id])
+  agent          User            @relation(fields: [userId], references: [id])
+  collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([userId])
+}
+
+enum CallOutcome {
+  PROMISE_TO_PAY
+  DISPUTE
+  NO_CONTACT
+  CALLBACK_REQUESTED
+  RESOLVED
+  OTHER
+}
+
+// ── Payment Promises ──────────────────────────────────────────────────────────
+model PaymentPromise {
+  id               String         @id @default(cuid())
+  invoiceId        String
+  collectionCaseId String?
+  promisedAmount   Decimal        @db.Decimal(19, 4)
+  promisedDate     DateTime
+  status           PromiseStatus  @default(PENDING)
+  notes            String?
+  tenantId         String
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  invoice        Invoice         @relation(fields: [invoiceId], references: [id])
+  collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
+
+  @@index([tenantId])
+  @@index([invoiceId])
+}
+
+enum PromiseStatus {
+  PENDING
+  KEPT
+  BROKEN
+  PARTIAL
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+model Notification {
+  id         String             @id @default(cuid())
+  customerId String
+  channel    NotificationChannel
+  template   String
+  payload    Json?
+  status     NotifStatus        @default(QUEUED)
+  sentAt     DateTime?
+  failReason String?
+  tenantId   String
+  createdAt  DateTime           @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([tenantId])
+  @@index([customerId])
+}
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+  SMS
+}
+
+enum NotifStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+}
+
+// ── Integration Config ────────────────────────────────────────────────────────
+model IntegrationConfig {
+  id        String   @id @default(cuid())
+  provider  String   // e.g. 'razorpay', 'twilio', 'whatsapp_business'
+  config    Json     // Encrypted at application layer before storing
+  isActive  Boolean  @default(false)
+  tenantId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, tenantId])
+  @@index([tenantId])
+}
+
+// ── Audit Log ─────────────────────────────────────────────────────────────────
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // e.g. 'customer.created', 'invoice.updated'
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  tenantId   String
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([createdAt])
+}
