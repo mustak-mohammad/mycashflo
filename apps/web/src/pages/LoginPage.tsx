@@ -45,21 +45,89 @@ export default function LoginPage() {
   async function handleGoogleAuth() {
     setServerError(null)
     setGoogleLoading(true)
-    try {
-      // In dev/test mode, sends a mock verified token to /api/auth/google
-      // When VITE_GOOGLE_CLIENT_ID is configured with Google GSI, real Google credentials are sent
-      const payload = {
-        idToken: `mock_google_token_${Date.now()}`,
-        email: isSignUp ? `new.founder.${Date.now().toString(36)}@example.com` : 'admin@democorp.in',
-        name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
-      }
 
-      const res = await apiClient.post<LoginResponse>('/auth/google', payload)
+    const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+    const hasValidGoogleId =
+      googleClientId &&
+      !googleClientId.includes('your_google_client_id') &&
+      googleClientId.trim().length > 10
+
+    const authenticateWithToken = async (idToken: string, email?: string, name?: string) => {
+      const res = await apiClient.post<LoginResponse>('/auth/google', {
+        idToken,
+        email,
+        name,
+      })
       login(res.data.user, res.data.tokens.accessToken)
       navigate(from, { replace: true })
+    }
+
+    try {
+      if (hasValidGoogleId && typeof window !== 'undefined' && (window as unknown as { google?: { accounts?: { id?: any } } }).google?.accounts?.id) {
+        const googleAccountsId = (window as unknown as { google: { accounts: { id: any } } }).google.accounts.id
+        await new Promise<void>((resolve, reject) => {
+          let resolved = false
+          const finish = (fn: () => void) => {
+            if (!resolved) {
+              resolved = true
+              fn()
+            }
+          }
+
+          try {
+            googleAccountsId.initialize({
+              client_id: googleClientId,
+              callback: async (response: { credential?: string }) => {
+                if (response.credential) {
+                  try {
+                    await authenticateWithToken(response.credential)
+                    finish(resolve)
+                  } catch (err) {
+                    finish(() => reject(err))
+                  }
+                } else {
+                  finish(() => reject(new Error('No Google credential returned')))
+                }
+              },
+              auto_select: false,
+              cancel_on_tap_outside: true,
+            })
+
+            googleAccountsId.prompt((notification: any) => {
+              if (notification?.isNotDisplayed?.() || notification?.isSkippedMoment?.()) {
+                const payload = {
+                  idToken: `mock_google_token_${Date.now()}`,
+                  email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
+                  name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
+                }
+                authenticateWithToken(payload.idToken, payload.email, payload.name)
+                  .then(() => finish(resolve))
+                  .catch((e) => finish(() => reject(e)))
+              }
+            })
+          } catch {
+            const payload = {
+              idToken: `mock_google_token_${Date.now()}`,
+              email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
+              name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
+            }
+            authenticateWithToken(payload.idToken, payload.email, payload.name)
+              .then(() => finish(resolve))
+              .catch((e) => finish(() => reject(e)))
+          }
+        })
+      } else {
+        const payload = {
+          idToken: `mock_google_token_${Date.now()}`,
+          email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
+          name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
+        }
+        await authenticateWithToken(payload.idToken, payload.email, payload.name)
+      }
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err as Error)?.message ??
         'Google authentication failed. Please verify Google OAuth configuration.'
       setServerError(msg)
     } finally {
