@@ -29,6 +29,8 @@ model Tenant {
   notifications    Notification[]
   integrationCfgs  IntegrationConfig[]
   auditLogs        AuditLog[]
+  actionProposals  ActionProposal[]
+  voicePrompts     VoicePrompt[]
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -48,6 +50,7 @@ model User {
   followUpTasks   FollowUpTask[]
   callSessions    CallSession[]
   auditLogs       AuditLog[]
+  createdPrompts  VoicePrompt[]
 
   @@unique([email, tenantId])
   @@index([tenantId])
@@ -262,6 +265,11 @@ model CallSession {
   outcome          CallOutcome?
   transcript       String?       @db.Text
   summary          String?       @db.Text
+  stage            String?       // Current or final conversation stage
+  metadata         Json?         // Structured extraction data (PTP amount, date, method, etc.)
+  recordingUrl       String?         // URL of the call audio recording (LiveKit egress output)
+  recordingStatus    RecordingStatus? // Lifecycle of the recording
+  recordingEgressId  String?         // LiveKit egress job id used to resolve the recording
   startedAt        DateTime      @default(now())
   endedAt          DateTime?
   tenantId         String
@@ -284,6 +292,13 @@ enum CallOutcome {
   CALLBACK_REQUESTED
   RESOLVED
   OTHER
+}
+
+enum RecordingStatus {
+  RECORDING
+  PROCESSING
+  AVAILABLE
+  FAILED
 }
 
 // ── Payment Promises ──────────────────────────────────────────────────────────
@@ -381,3 +396,64 @@ model AuditLog {
   @@index([userId])
   @@index([createdAt])
 }
+
+// ── Action Proposals (AI Confirmation Workflow) ──────────────────────────────
+model ActionProposal {
+  id              String         @id @default(cuid())
+  actionType      String         // e.g. 'record_payment_promise', 'dispute_invoice', 'send_notification'
+  toolName        String
+  parameters      Json
+  summary         String
+  riskLevel       ActionRisk     @default(MEDIUM)
+  status          ProposalStatus @default(PENDING) // PENDING, APPROVED, REJECTED, EXECUTED
+  rejectionReason String?
+  result          Json?
+  expiresAt       DateTime?
+  executedAt      DateTime?
+  proposedBy      String         // e.g. 'CHOTU_AI' or userId
+  reviewedBy      String?
+  tenantId        String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+enum ActionRisk {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXECUTED
+}
+
+// ── Saved Voice Prompts ───────────────────────────────────────────────────────
+model VoicePrompt {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  promptText  String   @db.Text
+  category    String   @default("COLLECTIONS") // COLLECTIONS, OVERDUE, DISPUTE, COURTESY, LEGAL
+  language    String   @default("en-IN")
+  isActive    Boolean  @default(true)
+  tenantId    String
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  creator User?  @relation(fields: [createdBy], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, category])
+  @@index([tenantId, isActive])
+}
+

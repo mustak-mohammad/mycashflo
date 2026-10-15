@@ -54,6 +54,73 @@ export class InvoicesService {
     return { data, total, page, limit };
   }
 
+  async exportCsv(user: AuthUser, query: InvoiceQueryDto): Promise<string> {
+    const { tenantId } = user;
+
+    const where = {
+      tenantId,
+      ...(query.customerId ? { customerId: query.customerId } : {}),
+      ...(query.status ? { status: query.status as any } : {}),
+    };
+
+    const invoices = await this.prisma.invoice.findMany({
+      where,
+      orderBy: { dueDate: 'asc' },
+      include: { customer: { select: { name: true } } },
+    });
+
+    const escapeCell = (val: any): string => {
+      let str = val === null || val === undefined ? '' : String(val);
+      // Formula injection defense: prepend apostrophe if string begins with =, +, -, @, \t, \r
+      if (/^[=+\-@\t\r]/.test(str)) {
+        str = "'" + str;
+      }
+      if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const rows: string[] = [];
+    rows.push(
+      ['Invoice #', 'Customer', 'Amount (INR)', 'Outstanding (INR)', 'Issue Date', 'Due Date', 'Status', 'Currency'].join(','),
+    );
+
+    for (const inv of invoices) {
+      rows.push(
+        [
+          inv.number,
+          inv.customer?.name ?? '',
+          Number(inv.amount).toFixed(2),
+          Number(inv.outstanding).toFixed(2),
+          inv.issueDate.toISOString().slice(0, 10),
+          inv.dueDate.toISOString().slice(0, 10),
+          inv.status,
+          inv.currency,
+        ]
+          .map(escapeCell)
+          .join(','),
+      );
+    }
+
+    return rows.join('\r\n');
+  }
+
+  async getInvoiceForPdf(id: string, user: AuthUser) {
+    const invoice = await this.prisma.invoice.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: { customer: true },
+    });
+    if (!invoice) throw new NotFoundException('Invoice not found');
+
+    const tenant = await this.prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      select: { name: true },
+    });
+
+    return { invoice, tenantName: tenant?.name ?? 'myCashflo' };
+  }
+
   async findOne(id: string, user: AuthUser) {
     const invoice = await this.prisma.invoice.findFirst({
       where: { id, tenantId: user.tenantId },

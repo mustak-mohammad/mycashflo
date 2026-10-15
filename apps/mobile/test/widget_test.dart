@@ -34,4 +34,51 @@ void main() {
     expect(customer.name, 'Raj Enterprises');
     expect(customer.outstandingBalance, 150000.0);
   });
+
+  test('ActionProposal model parsing test', () {
+    final json = {
+      'id': 'prop_1',
+      'toolName': 'record_payment_promise',
+      'summary': 'Record PTP for Raj Enterprises',
+      'riskLevel': 'HIGH',
+      'status': 'PENDING',
+      'createdAt': '2026-10-15T00:00:00.000Z',
+      'parameters': {'amount': 50000},
+    };
+
+    final prop = ActionProposal.fromJson(json);
+    expect(prop.id, 'prop_1');
+    expect(prop.toolName, 'record_payment_promise');
+    expect(prop.riskLevel, 'HIGH');
+    expect(prop.status, 'PENDING');
+  });
+
+  test('NotificationItem and AuditLogItem model parsing test', () {
+    final notifJson = {
+      'id': 'notif_1',
+      'customerId': 'c1',
+      'channel': 'WHATSAPP',
+      'template': 'PAYMENT_REMINDER_OVERDUE',
+      'status': 'DELIVERED',
+      'createdAt': '2026-10-15T00:00:00.000Z',
+      'customer': {'name': 'Raj Enterprises'},
+    };
+
+    final notif = NotificationItem.fromJson(notifJson);
+    expect(notif.customerName, 'Raj Enterprises');
+    expect(notif.channel, 'WHATSAPP');
+    expect(notif.status, 'DELIVERED');
+
+    final auditJson = {
+      'id': 'audit_1',
+      'action': 'ai.action_approved_and_executed',
+      'createdAt': '2026-10-15T00:00:00.000Z',
+      'user': {'name': 'Priya Sharma'},
+    };
+
+    final audit = AuditLogItem.fromJson(auditJson);
+    expect(audit.action, 'ai.action_approved_and_executed');
+    expect(audit.userName, 'Priya Sharma');
+  });
 }
+

@@ -32,7 +32,7 @@ function formatDate(d: string) {
 function Skeleton() {
   return (
     <tr>
-      {Array.from({ length: 6 }).map((_, i) => (
+      {Array.from({ length: 7 }).map((_, i) => (
         <td key={i} className="px-5 py-3.5">
           <div className="h-4 rounded animate-pulse" style={{ background: 'var(--surface-2)', width: '70%' }} />
         </td>
@@ -44,6 +44,7 @@ function Skeleton() {
 export default function InvoicesPage() {
   const [statusFilter, setStatusFilter] = useState('')
   const [page, setPage] = useState(1)
+  const [exporting, setExporting] = useState(false)
   const limit = 20
 
   const fetcher = useCallback(
@@ -53,11 +54,50 @@ export default function InvoicesPage() {
   const { data, loading, error } = useApi(fetcher)
   const totalPages = data ? Math.ceil(data.total / limit) : 1
 
+  const handleExport = async () => {
+    try {
+      setExporting(true)
+      await invoicesApi.downloadCsv({ status: statusFilter || undefined })
+    } catch (err: any) {
+      alert('Failed to export invoices: ' + (err?.message || 'Unknown error'))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const handleRowDownload = async (inv: Invoice) => {
+    try {
+      setDownloadingId(inv.id)
+      await invoicesApi.downloadPdf(inv.id, inv.number)
+    } catch (err: any) {
+      alert('Failed to download invoice: ' + (err?.message || 'Unknown error'))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <PageHeader
         title="Invoices"
         subtitle={`${data?.total ?? '…'} total invoices`}
+        action={
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+            style={{
+              background: '#059669',
+              color: '#ffffff',
+              border: 'none',
+              cursor: exporting ? 'wait' : 'pointer',
+            }}
+          >
+            <span>📥</span>
+            {exporting ? 'Exporting…' : 'Export CSV'}
+          </button>
+        }
       />
 
       <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
@@ -87,7 +127,7 @@ export default function InvoicesPage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                {['Invoice #', 'Customer', 'Amount', 'Outstanding', 'Due Date', 'Status'].map((h) => (
+                {['Invoice #', 'Customer', 'Amount', 'Outstanding', 'Due Date', 'Status', 'Actions'].map((h) => (
                   <th key={h} className="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>{h}</th>
                 ))}
               </tr>
@@ -97,7 +137,7 @@ export default function InvoicesPage() {
                 Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} />)
               ) : !data?.data?.length ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                  <td colSpan={7} className="px-5 py-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                     {statusFilter ? `No ${statusFilter.toLowerCase()} invoices.` : 'No invoices yet.'}
                   </td>
                 </tr>
@@ -117,6 +157,23 @@ export default function InvoicesPage() {
                         <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: st.bg, color: st.color }}>
                           {st.label}
                         </span>
+                      </td>
+                      <td className="px-5 py-3.5">
+                        <button
+                          onClick={() => handleRowDownload(inv)}
+                          disabled={downloadingId === inv.id}
+                          title="Download invoice PDF"
+                          className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1"
+                          style={{
+                            background: 'var(--surface-2)',
+                            color: 'var(--text-muted)',
+                            border: '1px solid var(--border)',
+                            cursor: downloadingId === inv.id ? 'wait' : 'pointer',
+                          }}
+                        >
+                          <span>📄</span>
+                          {downloadingId === inv.id ? '…' : 'PDF'}
+                        </button>
                       </td>
                     </tr>
                   )

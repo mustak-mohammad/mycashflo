@@ -106,6 +106,8 @@ python agent.py
 cd services/api
 npm run test
 npm run test:e2e
+# Live E2E verification against running API & database
+node test/verify-phase6-live.mjs
 
 # Web build & typecheck
 cd apps/web
@@ -119,6 +121,7 @@ flutter test
 # Python agent tests
 cd services/voice-agent
 python -m unittest test_agent.py
+
 ```
 
 ---

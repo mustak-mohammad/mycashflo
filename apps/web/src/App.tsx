@@ -17,6 +17,8 @@ const CallHistoryPage = lazy(() => import('./pages/CallHistoryPage'))
 const FollowUpPage = lazy(() => import('./pages/FollowUpPage'))
 const ReportsPage = lazy(() => import('./pages/ReportsPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const IntelligencePage = lazy(() => import('./pages/IntelligencePage'))
+const VoicePromptsPage = lazy(() => import('./pages/VoicePromptsPage'))
 
 function PageLoader() {
   return (
@@ -45,7 +47,9 @@ export default function App() {
                   <Route path="/invoices" element={<InvoicesPage />} />
                   <Route path="/collections" element={<CollectionsPage />} />
                   <Route path="/payments" element={<PaymentsPage />} />
+                  <Route path="/intelligence" element={<IntelligencePage />} />
                   <Route path="/voice" element={<VoicePage />} />
+                  <Route path="/voice-prompts" element={<VoicePromptsPage />} />
                   <Route path="/calls" element={<CallHistoryPage />} />
                   <Route path="/follow-ups" element={<FollowUpPage />} />
                   <Route path="/reports" element={<ReportsPage />} />

@@ -33,7 +33,7 @@ function formatDateTime(dateStr?: string) {
 function Skeleton() {
   return (
     <tr>
-      {Array.from({ length: 5 }).map((_, i) => (
+      {Array.from({ length: 7 }).map((_, i) => (
         <td key={i} className="px-5 py-3.5">
           <div className="h-4 rounded animate-pulse" style={{ background: 'var(--surface-2)', width: '80%' }} />
         </td>
@@ -45,6 +45,8 @@ function Skeleton() {
 export default function CallHistoryPage() {
   const [outcomeFilter, setOutcomeFilter] = useState<string>('')
   const [page, setPage] = useState(1)
+  const [exporting, setExporting] = useState(false)
+  const [downloadingId, setDownloadingId] = useState<string | null>(null)
   const limit = 20
 
   const fetcher = useCallback(
@@ -56,11 +58,50 @@ export default function CallHistoryPage() {
   const calls = data?.data ?? []
   const total = data?.total ?? 0
 
+  const handleExport = async () => {
+    try {
+      setExporting(true)
+      await callsApi.downloadCsv({ outcome: outcomeFilter || undefined })
+    } catch (err: any) {
+      alert('Failed to export call history: ' + (err?.message || 'Unknown error'))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleRecordingDownload = async (c: CallSession) => {
+    try {
+      setDownloadingId(c.id)
+      const label = (c.customer?.name ?? 'call').replace(/[^a-z0-9]+/gi, '-').toLowerCase()
+      await callsApi.downloadRecording(c.id, label)
+    } catch (err: any) {
+      alert('Failed to download recording: ' + (err?.message || 'Unknown error'))
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <PageHeader
         title="Call History"
         subtitle={`${total} total AI voice & collection call records`}
+        action={
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            className="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+            style={{
+              background: '#059669',
+              color: '#ffffff',
+              border: 'none',
+              cursor: exporting ? 'wait' : 'pointer',
+            }}
+          >
+            <span>📥</span>
+            {exporting ? 'Exporting…' : 'Export CSV'}
+          </button>
+        }
       />
 
       {error && (
@@ -104,7 +145,7 @@ export default function CallHistoryPage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                {['Customer', 'Duration', 'Date & Time', 'Outcome', 'Summary', 'Agent'].map((h) => (
+                {['Customer', 'Duration', 'Date & Time', 'Outcome', 'Summary', 'Agent', 'Recording'].map((h) => (
                   <th key={h} className="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                     {h}
                   </th>
@@ -116,7 +157,7 @@ export default function CallHistoryPage() {
                 Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} />)
               ) : calls.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-8 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                  <td colSpan={7} className="px-5 py-8 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                     No call sessions recorded yet. Calls initiated via Chotu AI will automatically appear here.
                   </td>
                 </tr>
@@ -151,6 +192,29 @@ export default function CallHistoryPage() {
                       </td>
                       <td className="px-5 py-3.5 text-xs" style={{ color: 'var(--text-muted)' }}>
                         {c.agent?.name ?? 'Chotu AI'}
+                      </td>
+                      <td className="px-5 py-3.5">
+                        {c.recordingStatus ? (
+                          <button
+                            onClick={() => handleRecordingDownload(c)}
+                            disabled={downloadingId === c.id}
+                            title="Download call recording"
+                            className="px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1"
+                            style={{
+                              background: 'rgba(99,102,241,0.15)',
+                              color: 'var(--primary)',
+                              border: '1px solid var(--border)',
+                              cursor: downloadingId === c.id ? 'wait' : 'pointer',
+                            }}
+                          >
+                            <span>🎙️</span>
+                            {downloadingId === c.id ? 'Preparing…' : 'Audio'}
+                          </button>
+                        ) : (
+                          <span className="text-[10px] uppercase tracking-wider font-semibold opacity-30" style={{ color: 'var(--text-muted)' }}>
+                            No Audio
+                          </span>
+                        )}
                       </td>
                     </tr>
                   )

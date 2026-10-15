@@ -105,6 +105,9 @@ export interface CallSession {
   summary?: string
   startedAt: string
   endedAt?: string
+  recordingStatus?: 'RECORDING' | 'PROCESSING' | 'AVAILABLE' | 'FAILED'
+  recordingUrl?: string
+  recordingEgressId?: string
 }
 
 export interface VoiceSessionToken {
@@ -183,3 +186,105 @@ export interface ApiError {
   statusCode: number
   error?: string
 }
+
+// ── Voice Prompts Management ──────────────────────────────────────────────────
+export interface VoicePrompt {
+  id: string
+  name: string
+  description?: string | null
+  promptText: string
+  category: string
+  language: string
+  isActive: boolean
+  tenantId: string
+  createdBy?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateVoicePromptRequest {
+  name: string
+  description?: string
+  promptText: string
+  category?: string
+  language?: string
+  isActive?: boolean
+}
+
+export interface UpdateVoicePromptRequest {
+  name?: string
+  description?: string
+  promptText?: string
+  category?: string
+  language?: string
+  isActive?: boolean
+}
+
+// ── Customer Ledger & Reports ─────────────────────────────────────────────────
+export interface LedgerEntry {
+  id: string
+  date: string
+  ref: string
+  type: 'INVOICE' | 'PAYMENT'
+  customerId: string
+  customerName: string
+  invoiceNumber?: string
+  description: string
+  debit: number
+  credit: number
+  runningBalance: number
+  status: string
+  currency: string
+}
+
+export interface LedgerSummary {
+  openingBalance: number
+  totalDebits: number
+  totalCredits: number
+  netBalance: number
+  entryCount: number
+  currency: string
+}
+
+export interface LedgerResponse {
+  data: LedgerEntry[]
+  summary: LedgerSummary
+}
+
+// ── Structured 10-Stage Chotu AI Conversation Flow ───────────────────────────
+export type ConversationStage =
+  | 'GREETING_AND_VERIFICATION'
+  | 'CONFIRM_BALANCE'
+  | 'ASK_FULL_PAYMENT'
+  | 'NEGOTIATE_AMOUNT'
+  | 'ASK_PAYMENT_DATE'
+  | 'ASK_DELAY_REASON'
+  | 'PAYMENT_METHOD'
+  | 'ASSISTANCE_CHECK'
+  | 'SUMMARIZE_COMMITMENT'
+  | 'CLOSING'
+  | 'CALLBACK_SCHEDULED'
+  | 'DISPUTE_LOGGED'
+  | 'TRANSFERRED_TO_AGENT'
+  | 'CALL_ENDED'
+
+export interface ConversationTurnRequest {
+  userSpeech: string
+  currentStage: ConversationStage
+  customerId?: string
+  invoiceId?: string
+  promptId?: string
+  sessionId?: string
+  extractedData?: Record<string, any>
+  turnCount?: number
+}
+
+export interface ConversationTurnResponse {
+  reply: string
+  nextStage: ConversationStage
+  shouldEnd: boolean
+  outcome?: string
+  extractedData: Record<string, any>
+  actionExecuted?: string
+}
+

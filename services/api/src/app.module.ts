@@ -12,6 +12,10 @@ import { ReportsModule } from './reports/reports.module.js';
 import { FollowUpsModule } from './follow-ups/follow-ups.module.js';
 import { CallsModule } from './calls/calls.module.js';
 import { VoiceModule } from './voice/voice.module.js';
+import { AuditLogsModule } from './audit-logs/audit-logs.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
+import { IntelligenceModule } from './intelligence/intelligence.module.js';
+import { PromptsModule } from './prompts/prompts.module.js';
 
 @Module({
   imports: [
@@ -26,8 +30,13 @@ import { VoiceModule } from './voice/voice.module.js';
     FollowUpsModule,
     CallsModule,
     VoiceModule,
+    AuditLogsModule,
+    NotificationsModule,
+    IntelligenceModule,
+    PromptsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
 })
 export class AppModule {}
+

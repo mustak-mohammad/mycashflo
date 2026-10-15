@@ -165,3 +165,96 @@ class DashboardStats {
     );
   }
 }
+
+// ── Phase 6: Collections Intelligence Models ─────────────────────────────────
+
+class ActionProposal {
+  final String id;
+  final String toolName;
+  final String summary;
+  final String riskLevel;
+  final String status;
+  final String createdAt;
+  final Map<String, dynamic> parameters;
+
+  ActionProposal({
+    required this.id,
+    required this.toolName,
+    required this.summary,
+    required this.riskLevel,
+    required this.status,
+    required this.createdAt,
+    required this.parameters,
+  });
+
+  factory ActionProposal.fromJson(Map<String, dynamic> json) {
+    return ActionProposal(
+      id: json['id'] ?? '',
+      toolName: json['toolName'] ?? '',
+      summary: json['summary'] ?? '',
+      riskLevel: json['riskLevel'] ?? 'MEDIUM',
+      status: json['status'] ?? 'PENDING',
+      createdAt: json['createdAt'] ?? '',
+      parameters: json['parameters'] != null ? Map<String, dynamic>.from(json['parameters']) : {},
+    );
+  }
+}
+
+class NotificationItem {
+  final String id;
+  final String customerId;
+  final String customerName;
+  final String channel;
+  final String template;
+  final String status;
+  final String createdAt;
+
+  NotificationItem({
+    required this.id,
+    required this.customerId,
+    required this.customerName,
+    required this.channel,
+    required this.template,
+    required this.status,
+    required this.createdAt,
+  });
+
+  factory NotificationItem.fromJson(Map<String, dynamic> json) {
+    return NotificationItem(
+      id: json['id'] ?? '',
+      customerId: json['customerId'] ?? '',
+      customerName: json['customer']?['name'] ?? 'Customer',
+      channel: json['channel'] ?? 'WHATSAPP',
+      template: json['template'] ?? '',
+      status: json['status'] ?? 'QUEUED',
+      createdAt: json['createdAt'] ?? '',
+    );
+  }
+}
+
+class AuditLogItem {
+  final String id;
+  final String action;
+  final String userName;
+  final String? entityType;
+  final String createdAt;
+
+  AuditLogItem({
+    required this.id,
+    required this.action,
+    required this.userName,
+    this.entityType,
+    required this.createdAt,
+  });
+
+  factory AuditLogItem.fromJson(Map<String, dynamic> json) {
+    return AuditLogItem(
+      id: json['id'] ?? '',
+      action: json['action'] ?? '',
+      userName: json['user']?['name'] ?? 'System',
+      entityType: json['entityType'],
+      createdAt: json['createdAt'] ?? '',
+    );
+  }
+}
+

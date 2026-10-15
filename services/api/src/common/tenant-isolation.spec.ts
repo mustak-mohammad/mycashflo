@@ -3,6 +3,8 @@ import { CustomersService } from '../customers/customers.service.js';
 import { InvoicesService } from '../invoices/invoices.service.js';
 import { FollowUpsService } from '../follow-ups/follow-ups.service.js';
 import { CallsService } from '../calls/calls.service.js';
+import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { NotFoundException } from '@nestjs/common';
@@ -13,6 +15,8 @@ describe('Multi-Tenant Isolation Verification', () => {
   let invoicesService: InvoicesService;
   let followUpsService: FollowUpsService;
   let callsService: CallsService;
+  let auditLogsService: AuditLogsService;
+  let notificationsService: NotificationsService;
 
   const tenantAUser: AuthUser = {
     userId: 'user_tenant_a',
@@ -48,12 +52,28 @@ describe('Multi-Tenant Isolation Verification', () => {
         count: vi.fn(),
         findFirst: vi.fn(),
       },
+      auditLog: {
+        findMany: vi.fn(),
+        count: vi.fn(),
+        create: vi.fn(),
+      },
+      notification: {
+        findMany: vi.fn(),
+        count: vi.fn(),
+        findFirst: vi.fn(),
+        create: vi.fn(),
+      },
+      tenant: {
+        findUnique: vi.fn(),
+      },
     };
 
     customersService = new CustomersService(mockPrisma as PrismaService);
     invoicesService = new InvoicesService(mockPrisma as PrismaService);
     followUpsService = new FollowUpsService(mockPrisma as PrismaService);
     callsService = new CallsService(mockPrisma as PrismaService);
+    auditLogsService = new AuditLogsService(mockPrisma as PrismaService);
+    notificationsService = new NotificationsService(mockPrisma as PrismaService, auditLogsService);
   });
 
   describe('Customer Isolation', () => {
@@ -140,4 +160,48 @@ describe('Multi-Tenant Isolation Verification', () => {
       );
     });
   });
+
+  describe('Audit Log Isolation', () => {
+    it('scopes audit logs strictly to the callers tenantId', async () => {
+      mockPrisma.auditLog.findMany.mockResolvedValue([]);
+      mockPrisma.auditLog.count.mockResolvedValue(0);
+
+      await auditLogsService.findAll(tenantAUser, { page: 1, limit: 10 });
+      expect(mockPrisma.auditLog.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ tenantId: 'tenant_a_id' }),
+        }),
+      );
+
+      await auditLogsService.findAll(tenantBUser, { page: 1, limit: 10 });
+      expect(mockPrisma.auditLog.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ tenantId: 'tenant_b_id' }),
+        }),
+      );
+    });
+  });
+
+  describe('Notification Isolation', () => {
+    it('scopes notification queries strictly to the callers tenantId', async () => {
+      mockPrisma.notification.findMany.mockResolvedValue([]);
+      mockPrisma.notification.count.mockResolvedValue(0);
+
+      await notificationsService.findAll(tenantAUser, { page: 1, limit: 10 });
+      expect(mockPrisma.notification.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ tenantId: 'tenant_a_id' }),
+        }),
+      );
+    });
+
+    it('rejects cross-tenant notification retrieval', async () => {
+      mockPrisma.notification.findFirst.mockResolvedValue(null);
+
+      await expect(
+        notificationsService.findOne('notif_of_tenant_b', tenantAUser),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
 });
+

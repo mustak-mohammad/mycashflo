@@ -64,11 +64,15 @@ _Last updated: October 2026_
 - Zero-dependency interactive CLI simulation mode (`python agent.py --simulate`)
 - Standalone unit tests passing (`python -m unittest test_agent.py`)
 
-## Phase 6 — Collections Intelligence 🔜
-- Backend tools for AI: `get_customer_balance`, `get_overdue_invoices`, etc.
-- Multi-channel notification dispatch (WhatsApp, SMS, Email)
-- Confirmation before consequential AI actions
-- Tenant-scoped audit logs
+## Phase 6 — Collections Intelligence ✅
+- Backend tools for AI (`get_customer_balance`, `get_overdue_invoices`, `get_customer_summary`, `create_follow_up_task`, `record_payment_promise`, `dispute_invoice`, `dispatch_reminder`)
+- Human-in-the-loop confirmation before consequential AI actions (`ActionProposal` workflow: approval, rejection, and auto-execution)
+- Multi-channel notification dispatch (WhatsApp, SMS, Email) with template rendering and automated ageing rules
+- Tenant-scoped audit logs with strict row-level isolation and compliance metadata
+- Interactive Collections Intelligence Web dashboard (`/intelligence`) with action review queue, dispatch bench, AI assistant, and audit trail
+- Chotu AI Python Voice Agent integration with tool calling and verbal confirmation guard
+- Mobile Dart data models and test suite updated
+
 
 ## Phase 7 — Integrations 🔜
 - Payment link provider adapter (Razorpay / Stripe)

@@ -3,7 +3,8 @@ import { PageHeader } from '../components/ui/PageHeader'
 import { voiceApi } from '../api/voice'
 import { callsApi } from '../api/calls'
 import { customersApi } from '../api/customers'
-import type { Customer, VoiceSessionToken } from '../types'
+import { promptsApi } from '../api/prompts'
+import type { Customer, VoiceSessionToken, VoicePrompt, ConversationStage } from '../types'
 
 type AgentStatus = 'idle' | 'connecting' | 'active' | 'completed' | 'error'
 
@@ -13,10 +14,25 @@ interface TranscriptMessage {
   time: string
 }
 
+const STAGES: { id: ConversationStage; label: string; step: number }[] = [
+  { id: 'GREETING_AND_VERIFICATION', label: '1. Identity', step: 1 },
+  { id: 'CONFIRM_BALANCE', label: '2. Balance', step: 2 },
+  { id: 'ASK_FULL_PAYMENT', label: '3. Full Pay', step: 3 },
+  { id: 'NEGOTIATE_AMOUNT', label: '4. Negotiate', step: 4 },
+  { id: 'ASK_PAYMENT_DATE', label: '5. Date', step: 5 },
+  { id: 'ASK_DELAY_REASON', label: '6. Reason', step: 6 },
+  { id: 'PAYMENT_METHOD', label: '7. Mode', step: 7 },
+  { id: 'ASSISTANCE_CHECK', label: '8. Link/Help', step: 8 },
+  { id: 'SUMMARIZE_COMMITMENT', label: '9. Summary', step: 9 },
+  { id: 'CLOSING', label: '10. Close', step: 10 },
+]
+
 export default function VoicePage() {
   const [status, setStatus] = useState<AgentStatus>('idle')
   const [customers, setCustomers] = useState<Customer[]>([])
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('')
+  const [prompts, setPrompts] = useState<VoicePrompt[]>([])
+  const [selectedPromptId, setSelectedPromptId] = useState<string>('')
   const [sessionToken, setSessionToken] = useState<VoiceSessionToken | null>(null)
   const [duration, setDuration] = useState<number>(0)
   const [transcript, setTranscript] = useState<TranscriptMessage[]>([])
@@ -28,15 +44,23 @@ export default function VoicePage() {
   const [isListening, setIsListening] = useState<boolean>(false)
   const [manualInput, setManualInput] = useState<string>('')
 
+  // 10-Stage Conversation State
+  const [currentStage, setCurrentStage] = useState<ConversationStage>('GREETING_AND_VERIFICATION')
+  const [extractedData, setExtractedData] = useState<Record<string, any>>({})
+  const [turnCount, setTurnCount] = useState<number>(0)
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined)
+  const [egressId, setEgressId] = useState<string | undefined>(undefined)
+
   const timerRef = useRef<any>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const recognitionRef = useRef<any>(null)
   const animFrameRef = useRef<number | null>(null)
 
+  // Load customers
   useEffect(() => {
     customersApi
-      .list({ limit: 10 })
+      .list({ limit: 20 })
       .then((res) => {
         const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : []
         setCustomers(list)
@@ -47,6 +71,21 @@ export default function VoicePage() {
       .catch((err) => {
         console.error('Failed to load customers for voice assistant', err)
         setCustomers([])
+      })
+  }, [])
+
+  // Load saved prompts
+  useEffect(() => {
+    promptsApi
+      .list({ isActive: true })
+      .then((data) => {
+        setPrompts(data || [])
+        if (data && data.length > 0) {
+          setSelectedPromptId(data[0].id)
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load saved prompts', err)
       })
   }, [])
 
@@ -96,6 +135,7 @@ export default function VoicePage() {
 
   const customerList = Array.isArray(customers) ? customers : []
   const selectedCustomer = customerList.find((c) => c.id === selectedCustomerId)
+  const selectedPrompt = prompts.find((p) => p.id === selectedPromptId)
 
   function speakText(text: string) {
     if ('speechSynthesis' in window) {
@@ -107,32 +147,50 @@ export default function VoicePage() {
     }
   }
 
-  function handleAgentReply(userUtterance: string) {
-    const textLower = userUtterance.toLowerCase()
-    const custName = selectedCustomer?.name ?? 'Customer'
-    let reply = ''
-    let newOutcome: 'PROMISE_TO_PAY' | 'RESOLVED' | 'NO_CONTACT' | 'DISPUTE' = outcome
+  // Multi-turn 10-stage handler via backend API
+  async function handleAgentReply(userUtterance: string) {
+    try {
+      const res = await voiceApi.processTurn({
+        userSpeech: userUtterance,
+        currentStage,
+        customerId: selectedCustomerId || undefined,
+        promptId: selectedPromptId || undefined,
+        sessionId,
+        extractedData,
+        turnCount,
+      })
 
-    if (textLower.includes('friday') || textLower.includes('monday') || textLower.includes('tomorrow') || textLower.includes('pay') || textLower.includes('transfer')) {
-      newOutcome = 'PROMISE_TO_PAY'
-      reply = `Thank you for confirming, ${custName}. I have recorded your commitment to pay. You will receive an acknowledgment confirmation shortly.`
-    } else if (textLower.includes('dispute') || textLower.includes('wrong') || textLower.includes('incorrect') || textLower.includes('not received')) {
-      newOutcome = 'DISPUTE'
-      reply = `I understand there may be an item under review, ${custName}. I have flagged this invoice for immediate account reconciliation with our billing team.`
-    } else if (textLower.includes('busy') || textLower.includes('later') || textLower.includes('driving')) {
-      newOutcome = 'NO_CONTACT'
-      reply = `Understood. I will schedule a follow-up reminder to reach out at a more convenient time later today.`
-    } else {
-      reply = `Understood. Regarding your outstanding balance, could you specify an estimated date when we can expect the remittance?`
+      setCurrentStage(res.nextStage)
+      setExtractedData(res.extractedData || {})
+      setTurnCount((prev) => prev + 1)
+
+      if (res.outcome) {
+        if (res.outcome === 'PROMISE_TO_PAY') setOutcome('PROMISE_TO_PAY')
+        else if (res.outcome === 'DISPUTE') setOutcome('DISPUTE')
+        else if (res.outcome === 'CALLBACK_REQUESTED' || res.outcome === 'WRONG_CONTACT') setOutcome('NO_CONTACT')
+      }
+
+      const timeStr = new Date().toTimeString().slice(3, 8)
+      setTranscript((prev) => [
+        ...prev,
+        { speaker: 'agent', text: res.reply, time: timeStr },
+      ])
+
+      speakText(res.reply)
+
+      if (res.shouldEnd) {
+        setTimeout(() => handleEnd(), 2500)
+      }
+    } catch (err: any) {
+      console.error('Error in agent turn:', err)
+      const fallbackReply = `Thank you. Regarding your account balance, could you specify what date we can expect the remittance?`
+      const timeStr = new Date().toTimeString().slice(3, 8)
+      setTranscript((prev) => [
+        ...prev,
+        { speaker: 'agent', text: fallbackReply, time: timeStr },
+      ])
+      speakText(fallbackReply)
     }
-
-    setOutcome(newOutcome)
-    const timeStr = new Date().toTimeString().slice(3, 8)
-    setTranscript((prev) => [
-      ...prev,
-      { speaker: 'agent', text: reply, time: timeStr },
-    ])
-    speakText(reply)
   }
 
   async function startMicrophone() {
@@ -212,6 +270,9 @@ export default function VoicePage() {
     setSavedSuccess(false)
     setDuration(0)
     setTranscript([])
+    setCurrentStage('GREETING_AND_VERIFICATION')
+    setExtractedData({})
+    setTurnCount(0)
 
     try {
       const tokenData = await voiceApi.getToken({
@@ -225,17 +286,31 @@ export default function VoicePage() {
         ? `₹${Number(selectedCustomer.outstandingBalance).toLocaleString('en-IN')}`
         : 'outstanding balance'
 
-      const greeting = `Namaste! Am I speaking with the accounts department at ${custName}? This is Chotu calling from myCashflo regarding pending invoice balance of ${bal}.`
+      // Opening Greeting: customizable via selectedPrompt template or default
+      let greeting = `Namaste! Am I speaking with the accounts department at ${custName}? This is Chotu calling from myCashflo regarding pending balance of ${bal}.`
+      if (selectedPrompt && selectedPrompt.promptText) {
+        greeting = selectedPrompt.promptText
+          .replace(/\{\{customerName\}\}/g, custName)
+          .replace(/\{\{outstandingAmount\}\}/g, bal)
+          .replace(/\{\{invoiceNumber\}\}/g, 'INV-CURRENT')
+          .replace(/\{\{dueDate\}\}/g, 'immediate')
+          .replace(/\{\{companyName\}\}/g, selectedCustomer?.company || custName)
+      }
 
       setTranscript([
-        { speaker: 'system', text: `LiveKit Room session token issued: ${tokenData.roomName}`, time: '00:01' },
+        { speaker: 'system', text: `LiveKit Room session active: ${tokenData.roomName}`, time: '00:01' },
         { speaker: 'agent', text: greeting, time: '00:02' },
       ])
 
-      // Speak greeting via Web Speech Synthesis
-      speakText(greeting)
+      // Start recording the room session
+      voiceApi.startRecording({ roomName: tokenData.roomName }).then((res) => {
+        setEgressId(res.egressId)
+        console.log(`Recording started: ${res.egressId}`)
+      }).catch(err => {
+        console.warn('Failed to start recording:', err)
+      })
 
-      // Start actual microphone capture & SpeechRecognition
+      speakText(greeting)
       await startMicrophone()
     } catch (err) {
       console.error(err)
@@ -252,18 +327,29 @@ export default function VoicePage() {
     setStatus('completed')
     const finalDuration = duration || 25
     const custName = selectedCustomer?.name ?? 'Customer'
-    const summaryText = `Call conducted with ${custName}. Outcome: ${outcome}. Total duration: ${formatSec(finalDuration)}.`
+    const summaryText = `10-Stage Chotu call conducted with ${custName}. Final Stage: ${currentStage}. Outcome: ${outcome}. Total duration: ${formatSec(finalDuration)}.`
     setCallSummary(summaryText)
 
+    // Stop recording if active
+    if (egressId) {
+      voiceApi.stopRecording({ egressId }).catch(err => {
+        console.warn('Failed to stop recording:', err)
+      })
+    }
+
     try {
-      await callsApi.create({
+      const created = await callsApi.create({
         customerId: selectedCustomerId || undefined,
         duration: finalDuration,
         outcome,
         livekitRoom: sessionToken?.roomName,
+        recordingEgressId: egressId,
         summary: summaryText,
         transcript: transcript.map((m) => `[${m.speaker.toUpperCase()}]: ${m.text}`).join('\n'),
       })
+      if (created && (created as any).id) {
+        setSessionId((created as any).id)
+      }
       setSavedSuccess(true)
     } catch (err) {
       console.error('Failed to save call session', err)
@@ -276,6 +362,10 @@ export default function VoicePage() {
     setDuration(0)
     setTranscript([])
     setSavedSuccess(false)
+    setCurrentStage('GREETING_AND_VERIFICATION')
+    setExtractedData({})
+    setTurnCount(0)
+    setEgressId(undefined)
   }
 
   function handleSendManualMessage(e: React.FormEvent) {
@@ -297,23 +387,25 @@ export default function VoicePage() {
     return `${m}:${sec.toString().padStart(2, '0')}`
   }
 
+  const currentStepObj = STAGES.find((s) => s.id === currentStage)
+
   return (
     <div className="p-6 max-w-4xl mx-auto">
       <PageHeader
         title="Chotu AI Voice Assistant"
-        subtitle="Real-time AI-powered collection conversations with LiveKit protocol and microphone speech recognition"
+        subtitle="Configurable 10-stage structured collection conversation engine with LiveKit room and speech synthesis"
       />
 
-      {/* Target Customer Selection */}
+      {/* Target Customer & Prompt Selection Card */}
       <div className="rounded-xl p-4 mb-6" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1">Select Account for Voice Call</label>
+            <label className="block text-xs font-semibold text-slate-400 mb-1">Target Customer Account</label>
             <select
               value={selectedCustomerId}
               onChange={(e) => setSelectedCustomerId(e.target.value)}
               disabled={status === 'active' || status === 'connecting' || customerList.length === 0}
-              className="px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 min-w-60 focus:outline-none focus:border-indigo-500"
+              className="w-full px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-indigo-500"
             >
               {customerList.length > 0 ? (
                 customerList.map((c) => (
@@ -326,25 +418,70 @@ export default function VoicePage() {
               )}
             </select>
           </div>
-          {selectedCustomer && (
-            <div className="text-right text-xs" style={{ color: 'var(--text-muted)' }}>
-              <div>Phone: <span className="text-white font-mono">{selectedCustomer.phone}</span></div>
-              <div className="mt-0.5">Contact: <span className="text-white">{selectedCustomer.email}</span></div>
-            </div>
-          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-400 mb-1">Voice Prompt Template / Strategy</label>
+            <select
+              value={selectedPromptId}
+              onChange={(e) => setSelectedPromptId(e.target.value)}
+              disabled={status === 'active' || status === 'connecting'}
+              className="w-full px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="">Standard 10-Stage Progressive Flow</option>
+              {prompts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({p.category})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
-      {/* Voice interface */}
+      {/* 10-Stage Progressive Flow Visualizer */}
+      {(status === 'active' || status === 'completed') && (
+        <div className="rounded-xl p-4 mb-6" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+              Collection Stage: {currentStepObj?.label || currentStage}
+            </span>
+            <span className="text-xs px-2 py-0.5 rounded font-mono bg-indigo-950 text-indigo-300 border border-indigo-800">
+              Turn {turnCount}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 overflow-x-auto pb-1">
+            {STAGES.map((s) => {
+              const isActiveStage = currentStage === s.id
+              const isPastStage = currentStepObj ? s.step < currentStepObj.step : false
+              return (
+                <div
+                  key={s.id}
+                  className={`px-2.5 py-1 rounded text-[11px] font-semibold whitespace-nowrap transition-all ${
+                    isActiveStage
+                      ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/30 ring-1 ring-indigo-400'
+                      : isPastStage
+                      ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40'
+                      : 'bg-slate-900/60 text-slate-500 border border-slate-800'
+                  }`}
+                >
+                  {isPastStage ? '✓ ' : ''}{s.label}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Voice Interface */}
       <div className="rounded-2xl p-8 text-center" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        {/* Agent avatar with dynamic audio scale */}
+        {/* Agent Avatar */}
         <div className="flex items-center justify-center mb-6">
           <div
             className="flex items-center justify-center rounded-full text-5xl transition-all duration-100"
             style={{
               width: 120,
               height: 120,
-              transform: status === 'active' ? `scale(${1.0 + (audioLevel / 300)})` : 'scale(1)',
+              transform: status === 'active' ? `scale(${1.0 + audioLevel / 300})` : 'scale(1)',
               background: status === 'active'
                 ? 'linear-gradient(135deg, #6366f1, #818cf8)'
                 : 'var(--surface-2)',
@@ -360,10 +497,10 @@ export default function VoicePage() {
 
         <h2 className="text-xl font-bold text-white mb-1">Chotu AI Collection Agent</h2>
         <p className="text-sm mb-4" style={{ color: 'var(--text-muted)' }}>
-          {status === 'idle' && 'Ready to connect live collection call with microphone and speech recognition'}
+          {status === 'idle' && 'Ready to connect structured multi-stage call with audio synthesis and live transcript'}
           {status === 'connecting' && 'Negotiating LiveKit room session token…'}
           {status === 'active' && `Call in progress (${formatSec(duration)})`}
-          {status === 'completed' && 'Call ended — summary saved'}
+          {status === 'completed' && 'Call completed — commitment and transcript logged'}
           {status === 'error' && 'Connection failed — please retry'}
         </p>
 
@@ -371,7 +508,7 @@ export default function VoicePage() {
         <div className="flex flex-wrap items-center justify-center gap-3 mb-6">
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
             <span className={`w-2 h-2 rounded-full ${status === 'active' ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-            <span className="text-slate-300">{status === 'active' ? 'Live Room Active' : 'Standby'}</span>
+            <span className="text-slate-300">{status === 'active' ? 'Room Active' : 'Standby'}</span>
           </div>
 
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
@@ -382,9 +519,9 @@ export default function VoicePage() {
           </div>
 
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-slate-900 border border-slate-700">
-            <span className="text-slate-400">🗣️ Speech Engine:</span>
+            <span className="text-slate-400">🗣️ Engine:</span>
             <span className={isListening ? 'text-indigo-400 font-semibold animate-pulse' : 'text-slate-400'}>
-              {isListening ? 'Listening' : 'Web Speech API'}
+              {isListening ? 'Listening' : 'Ready'}
             </span>
           </div>
         </div>
@@ -396,7 +533,7 @@ export default function VoicePage() {
             className="px-8 py-3 rounded-xl text-white font-semibold text-sm cursor-pointer transition-all duration-150"
             style={{ background: 'var(--primary)', border: 'none' }}
           >
-            🎙️ Start Voice Session (Microphone Enabled)
+            🎙️ Start Structured Voice Session
           </button>
         ) : status === 'active' ? (
           <button
@@ -404,7 +541,7 @@ export default function VoicePage() {
             className="px-8 py-3 rounded-xl font-semibold text-sm cursor-pointer transition-all duration-150"
             style={{ background: 'rgba(239,68,68,0.12)', border: '1px solid var(--danger)', color: 'var(--danger)' }}
           >
-            ⏹ End & Save Session
+            ⏹ End & Save Call Session
           </button>
         ) : status === 'completed' ? (
           <div className="flex justify-center gap-3">
@@ -426,6 +563,33 @@ export default function VoicePage() {
           </button>
         )}
 
+        {/* Extracted Commitment Card */}
+        {(extractedData.agreedAmount || extractedData.promisedDate || extractedData.paymentMethod) && (
+          <div className="mt-6 p-4 rounded-xl text-left bg-slate-900/90 border border-indigo-900/50">
+            <h4 className="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-2">
+              📝 Extracted Payment Commitment
+            </h4>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div>
+                <span className="text-slate-400">Promised Amount:</span>
+                <div className="text-white font-bold">{extractedData.agreedAmount || '—'}</div>
+              </div>
+              <div>
+                <span className="text-slate-400">Remittance Date:</span>
+                <div className="text-white font-bold">{extractedData.promisedDate || '—'}</div>
+              </div>
+              <div>
+                <span className="text-slate-400">Payment Mode:</span>
+                <div className="text-white font-bold">{extractedData.paymentMethod || '—'}</div>
+              </div>
+              <div>
+                <span className="text-slate-400">Instant Link:</span>
+                <div className="text-white font-bold">{extractedData.sendLink ? 'Yes (Requested)' : 'No'}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Outcome Selector */}
         {(status === 'active' || status === 'completed') && (
           <div className="mt-4 flex items-center justify-center gap-2 text-xs">
@@ -438,7 +602,7 @@ export default function VoicePage() {
               <option value="PROMISE_TO_PAY">Promise to Pay</option>
               <option value="RESOLVED">Resolved</option>
               <option value="DISPUTE">Dispute</option>
-              <option value="NO_CONTACT">No Contact</option>
+              <option value="NO_CONTACT">No Contact / Callback</option>
             </select>
           </div>
         )}
@@ -456,7 +620,7 @@ export default function VoicePage() {
           <div className="mt-8 rounded-xl p-5 text-left text-sm" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs font-semibold tracking-wider uppercase text-slate-400">
-                Live Transcript & Microphone Log
+                Live Conversation Transcript
               </span>
               <span className="text-xs font-mono text-slate-400">{formatSec(duration)}</span>
             </div>
@@ -483,12 +647,12 @@ export default function VoicePage() {
               ))}
             </div>
 
-            {/* Optional text input fallback for testing without voice speaking */}
+            {/* Manual text input for testing without microphone */}
             {status === 'active' && (
               <form onSubmit={handleSendManualMessage} className="flex gap-2 pt-2 border-t border-slate-700/60">
                 <input
                   type="text"
-                  placeholder="Or type a reply to Chotu (e.g. 'We will pay this Friday')…"
+                  placeholder="Type a response to Chotu (e.g. 'Yes speaking', 'We can pay ₹25,000 today', 'By Friday via UPI')…"
                   value={manualInput}
                   onChange={(e) => setManualInput(e.target.value)}
                   className="flex-1 px-3 py-1.5 rounded-lg text-xs bg-slate-900 border border-slate-700 text-white focus:outline-none focus:border-indigo-500"
