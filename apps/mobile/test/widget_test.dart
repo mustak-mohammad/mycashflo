@@ -80,5 +80,38 @@ void main() {
     expect(audit.action, 'ai.action_approved_and_executed');
     expect(audit.userName, 'Priya Sharma');
   });
+
+  test('PaymentLinkItem and TelephonyCallSession model parsing test', () {
+    final payLinkJson = {
+      'paymentLinkId': 'plink_12345',
+      'provider': 'RAZORPAY',
+      'shortUrl': 'https://rzp.io/i/mock_12345',
+      'amount': 25000,
+      'currency': 'INR',
+      'status': 'CREATED',
+      'isSimulated': true,
+    };
+
+    final payLink = PaymentLinkItem.fromJson(payLinkJson);
+    expect(payLink.paymentLinkId, 'plink_12345');
+    expect(payLink.provider, 'RAZORPAY');
+    expect(payLink.amount, 25000.0);
+    expect(payLink.isSimulated, true);
+
+    final callJson = {
+      'callSid': 'CA_sim_998877',
+      'provider': 'SIP_GATEWAY',
+      'status': 'SIMULATED',
+      'isSimulated': true,
+      'notes': 'Outbound telephony is disabled by policy. Safe simulation active.',
+    };
+
+    final callSession = TelephonyCallSession.fromJson(callJson);
+    expect(callSession.callSid, 'CA_sim_998877');
+    expect(callSession.status, 'SIMULATED');
+    expect(callSession.isSimulated, true);
+    expect(callSession.notes, contains('disabled by policy'));
+  });
 }
+
 

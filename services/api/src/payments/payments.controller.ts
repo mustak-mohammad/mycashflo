@@ -1,26 +1,95 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  Headers,
+  Req,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../auth/roles.guard.js';
+import { Roles } from '../auth/roles.decorator.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { PaymentsService, PaymentQueryDto } from './payments.service.js';
+import {
+  PaymentsService,
+  PaymentQueryDto,
+  CreatePaymentLinkDto,
+  RecordPaymentDto,
+  RecordPaymentClaimDto,
+} from './payments.service.js';
+import { UserRole } from '@prisma/client';
 
 @ApiTags('payments')
-@ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List payment records (paginated)' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'List payment records (paginated, scoped to assigned customers for Agents)' })
   findAll(@CurrentUser() user: AuthUser, @Query() query: PaymentQueryDto) {
     return this.paymentsService.findAll(user, query);
   }
 
   @Get('stats')
-  @ApiOperation({ summary: 'Aggregated payment statistics' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Aggregated payment statistics (scoped to assigned customers for Agents)' })
   getStats(@CurrentUser() user: AuthUser) {
     return this.paymentsService.getStats(user);
+  }
+
+  @Post('record')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Manually record a settlement payment against an invoice (Admin/Manager only)' })
+  recordPayment(@CurrentUser() user: AuthUser, @Body() dto: RecordPaymentDto) {
+    return this.paymentsService.recordPayment(user, dto);
+  }
+
+  @Post('claim')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Record customer payment claim awaiting verification without balance reduction' })
+  recordPaymentClaim(@CurrentUser() user: AuthUser, @Body() dto: RecordPaymentClaimDto) {
+    return this.paymentsService.recordPaymentClaim(user, dto);
+  }
+
+  @Post(':id/verify')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Verify and reconcile a pending payment claim (Admin/Manager only)' })
+  verifyPaymentClaim(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    return this.paymentsService.verifyPaymentClaim(id, user);
+  }
+
+  @Post('link')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Generate a payment link for an invoice via Razorpay or Stripe' })
+  createPaymentLink(@CurrentUser() user: AuthUser, @Body() dto: CreatePaymentLinkDto) {
+    return this.paymentsService.createPaymentLink(user, dto);
+  }
+
+  @Post('webhook/:provider')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Receive payment confirmation webhook from provider' })
+  handleWebhook(
+    @Param('provider') provider: string,
+    @Body() payload: any,
+    @Headers() headers: Record<string, string>,
+    @Req() req: any,
+  ) {
+    return this.paymentsService.handleWebhook(provider, payload, headers, req?.rawBody);
   }
 }

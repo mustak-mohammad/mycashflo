@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsOptional, IsEnum, IsString, IsBoolean, IsDateString, IsNumber } from 'class-validator';
@@ -108,16 +108,28 @@ export class FollowUpsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(user: AuthUser, query: FollowUpQueryDto) {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
+    const assignedFilter =
+      role === 'AGENT'
+        ? { assignedTo: userId }
+        : query.assignedTo
+        ? { assignedTo: query.assignedTo }
+        : {};
+
     const where = {
       tenantId,
+      ...assignedFilter,
       ...(query.priority ? { priority: query.priority } : {}),
       ...(query.done !== undefined ? { done: query.done } : {}),
-      ...(query.assignedTo ? { assignedTo: query.assignedTo } : {}),
+    };
+
+    const summaryWhere = {
+      tenantId,
+      ...assignedFilter,
     };
 
     const [data, total, pendingCount, completedCount] = await Promise.all([
@@ -136,8 +148,8 @@ export class FollowUpsService {
         },
       }),
       this.prisma.followUpTask.count({ where }),
-      this.prisma.followUpTask.count({ where: { tenantId, done: false } }),
-      this.prisma.followUpTask.count({ where: { tenantId, done: true } }),
+      this.prisma.followUpTask.count({ where: { ...summaryWhere, done: false } }),
+      this.prisma.followUpTask.count({ where: { ...summaryWhere, done: true } }),
     ]);
 
     return {
@@ -167,10 +179,17 @@ export class FollowUpsService {
     });
 
     if (!task) throw new NotFoundException('Follow-up task not found');
+
+    if (user.role === 'AGENT' && task.assignedTo !== user.userId) {
+      throw new ForbiddenException('Access denied: You are not assigned to this follow-up task');
+    }
+
     return task;
   }
 
   async create(user: AuthUser, dto: CreateFollowUpDto) {
+    const assignedTo = user.role === 'AGENT' ? user.userId : (dto.assignedTo ?? user.userId);
+
     return this.prisma.followUpTask.create({
       data: {
         title: dto.title,
@@ -179,7 +198,7 @@ export class FollowUpsService {
         priority: dto.priority ?? CasePriority.MEDIUM,
         collectionCaseId: dto.collectionCaseId,
         customerId: dto.customerId,
-        assignedTo: dto.assignedTo ?? user.userId,
+        assignedTo,
         tenantId: user.tenantId,
       },
       include: {
@@ -194,10 +213,14 @@ export class FollowUpsService {
   }
 
   async update(id: string, user: AuthUser, dto: UpdateFollowUpDto) {
-    await this.findOne(id, user);
+    const task = await this.findOne(id, user);
+
+    if (user.role === 'AGENT' && dto.assignedTo && dto.assignedTo !== user.userId) {
+      throw new ForbiddenException('Agents are not authorized to reassign tasks to other users');
+    }
 
     return this.prisma.followUpTask.update({
-      where: { id },
+      where: { id: task.id },
       data: {
         ...(dto.title !== undefined ? { title: dto.title } : {}),
         ...(dto.description !== undefined ? { description: dto.description } : {}),

@@ -6,7 +6,7 @@ export interface User {
   id: string
   email: string
   name: string
-  role: 'ADMIN' | 'MANAGER' | 'AGENT'
+  role: 'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'AGENT'
   tenantId: string
 }
 
@@ -94,13 +94,24 @@ export interface FollowUpTask {
   createdAt?: string
 }
 
+export type CallOutcome =
+  | 'PROMISE_TO_PAY'
+  | 'DISPUTE'
+  | 'NO_CONTACT'
+  | 'CALLBACK_REQUESTED'
+  | 'RESOLVED'
+  | 'OTHER'
+  | 'WILL_PAY_LATER'
+  | 'UNABLE_TO_PAY'
+  | 'PAYMENT_CLAIMED'
+
 export interface CallSession {
   id: string
   customerId?: string
   customer?: { id: string; name: string; phone?: string }
   agent?: { id: string; name: string; email: string }
   duration?: number
-  outcome?: 'PROMISE_TO_PAY' | 'DISPUTE' | 'NO_CONTACT' | 'CALLBACK_REQUESTED' | 'RESOLVED' | 'OTHER'
+  outcome?: CallOutcome
   transcript?: string
   summary?: string
   startedAt: string
@@ -146,9 +157,12 @@ export interface PaymentStats {
 
 export interface DashboardStats {
   totalReceivables: number
+  totalBilled?: number
+  totalCollected?: number
   overdueAmount: number
   collectedThisMonth: number
   openInvoiceCount: number
+  overdueInvoiceCount?: number
   overdueCustomerCount: number
   openCaseCount: number
   collectionRate: number
@@ -160,6 +174,51 @@ export interface DashboardStats {
     dueDate: string
     daysOverdue: number
   }>
+  agingBreakdown?: {
+    d0_30: number
+    d31_60: number
+    d61_90: number
+    d90plus: number
+    thresholdOverdueAmount: number
+    thresholdDays: number
+  }
+  recentPayments?: Array<{
+    id: string
+    amount: number
+    currency: string
+    paymentDate: string
+    reference: string
+    method: string
+    customerName: string
+    invoiceNumber: string
+  }>
+  collectionPriorities?: Array<{
+    customerId: string
+    customerName: string
+    overdueAmount: number
+    daysOverdue: number
+    priority: string
+    riskScore: number
+  }>
+  promisesToPay?: Array<{
+    id: string
+    promisedAmount: number
+    promisedDate: string
+    invoiceNumber: string
+    customerName: string
+    status: string
+  }>
+  pendingCallbacks?: Array<{
+    id: string
+    title: string
+    dueDate: string
+    priority: string
+    customerName: string
+  }>
+  appliedFilters?: {
+    dateRange: string
+    agingThreshold: number
+  }
 }
 
 export interface AgeingReport {
@@ -171,6 +230,7 @@ export interface AgeingReport {
 }
 
 export interface ReportSummary {
+  totalReceivables?: number
   totalBilled: number
   totalCollected: number
   totalOverdue: number
@@ -287,4 +347,137 @@ export interface ConversationTurnResponse {
   extractedData: Record<string, any>
   actionExecuted?: string
 }
+
+// ── Phase 7: Integrations ────────────────────────────────────────────────────
+export type IntegrationProvider = 'RAZORPAY' | 'STRIPE' | 'WHATSAPP_CLOUD' | 'SIP_TELEPHONY'
+
+export interface IntegrationItem {
+  id: string
+  provider: string
+  isActive: boolean
+  config: Record<string, any>
+  updatedAt: string
+  isConfigured: boolean
+}
+
+export interface PaymentLinkResponse {
+  paymentLinkId: string
+  paymentId: string
+  provider: 'RAZORPAY' | 'STRIPE'
+  shortUrl: string
+  amount: number
+  currency: string
+  status: string
+  invoiceId: string
+  invoiceNumber: string
+  isSimulated: boolean
+}
+
+export interface TelephonyCallResponse {
+  callSid: string
+  provider: string
+  status: string
+  isSimulated: boolean
+  notes: string
+  sessionId: string
+}
+
+// ── Automated Reminders (Chotu AI) ──────────────────────────────────────────
+export type ReminderStage =
+  | 'DUE_SOON'
+  | 'DUE_TODAY'
+  | 'OVERDUE_STAGE_1'
+  | 'OVERDUE_STAGE_2'
+  | 'OVERDUE_STAGE_3'
+
+export type ReminderChannelPreference = 'EMAIL' | 'WHATSAPP' | 'BOTH' | 'DISABLED'
+
+export interface TenantReminderSettings {
+  enabled: boolean
+  dryRun: boolean
+  channels: ('EMAIL' | 'WHATSAPP')[]
+  channelPreference: ReminderChannelPreference
+  scheduleCron: string
+  timezone: string
+  quietHours: {
+    startHour: number
+    endHour: number
+  }
+  maxDailyPerCustomer: number
+  minDaysBetweenReminders: number
+  testRecipientEmail?: string
+  testRecipientPhone?: string
+  globalEnabled: boolean
+}
+
+export interface ReminderEvaluationItem {
+  invoiceId: string
+  invoiceNumber: string
+  customerId: string
+  customerName: string
+  customerEmail: string
+  customerPhone: string
+  outstandingAmount: number
+  dueDate: string
+  daysOverdue: number
+  stage: ReminderStage
+  channel: 'EMAIL' | 'WHATSAPP' | 'BOTH'
+  idempotencyKey: string
+  isEligible: boolean
+  suppressionReason?: string
+  messagePreview?: {
+    subject?: string
+    message: string
+    template: string
+  }
+  dispatchedNotificationId?: string
+  dispatchStatus?: string
+}
+
+export interface RemindersRunSummary {
+  tenantId: string
+  evaluatedCount: number
+  eligibleCount: number
+  dispatchedCount: number
+  suppressedCount: number
+  failedCount: number
+  isDryRun: boolean
+  globalEnabled: boolean
+  timestamp: string
+  items: ReminderEvaluationItem[]
+  totalTenantInvoices?: number
+  settledInvoicesCount?: number
+}
+
+export interface ReminderStatsSummary {
+  totalEvaluated: number
+  sentCount: number
+  deliveredCount: number
+  failedCount: number
+  suppressedCount: number
+  pendingCount: number
+  lastRunAt?: string
+  isGloballyEnabled: boolean
+  isTenantEnabled: boolean
+  isDryRun: boolean
+}
+
+export interface ReminderHistoryItem {
+  id: string
+  customerId: string
+  channel: string
+  template: string
+  status: string
+  sentAt: string | null
+  failReason: string | null
+  createdAt: string
+  customer: {
+    id: string
+    name: string
+    email: string
+    phone: string
+  }
+  payload?: Record<string, any>
+}
+
 

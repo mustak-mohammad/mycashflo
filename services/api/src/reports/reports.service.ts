@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 
@@ -36,15 +36,47 @@ export interface LedgerResult {
 export class ReportsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async getAgentCustomerIds(tenantId: string, userId: string): Promise<string[]> {
+    try {
+      const [assignedCases, assignedTasks] = await Promise.all([
+        this.prisma.collectionCase?.findMany
+          ? this.prisma.collectionCase.findMany({
+              where: { tenantId, assignedTo: userId },
+              select: { customerId: true },
+            })
+          : [],
+        this.prisma.followUpTask?.findMany
+          ? this.prisma.followUpTask.findMany({
+              where: { tenantId, assignedTo: userId, customerId: { not: null } },
+              select: { customerId: true },
+            })
+          : [],
+      ]);
+      const allowed = new Set<string>();
+      (assignedCases || []).forEach((c: any) => c.customerId && allowed.add(c.customerId));
+      (assignedTasks || []).forEach((t: any) => t.customerId && allowed.add(t.customerId));
+      return Array.from(allowed);
+    } catch {
+      return [];
+    }
+  }
+
   /** Receivables ageing — buckets based on days past due */
   async getAgeing(user: AuthUser) {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
     const now = new Date();
+
+    let assignedFilter: any = {};
+    if (role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);
+      assignedFilter = { customerId: { in: allowedCustomerIds } };
+    }
 
     // Fetch all non-paid, non-cancelled overdue invoices with outstanding > 0
     const invoices = await this.prisma.invoice.findMany({
       where: {
         tenantId,
+        ...assignedFilter,
         status: { notIn: ['PAID', 'CANCELLED', 'DRAFT'] },
         outstanding: { gt: 0 },
         dueDate: { lt: now },
@@ -68,12 +100,38 @@ export class ReportsService {
   }
 
   /** KPI summary */
-  async getSummary(user: AuthUser) {
-    const { tenantId } = user;
+  async getSummary(
+    user: AuthUser,
+    query?: { dateRange?: string; startDate?: string; endDate?: string },
+  ) {
+    const { tenantId, role, userId } = user;
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
+    let assignedFilter: any = {};
+    if (role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);
+      assignedFilter = { customerId: { in: allowedCustomerIds } };
+    }
+
+    // Date range filter matching AppController
+    let dateFilter: { gte?: Date; lte?: Date } | undefined;
+    if (query?.dateRange === '30d') {
+      dateFilter = { gte: new Date(now.getTime() - 30 * 86_400_000) };
+    } else if (query?.dateRange === '90d') {
+      dateFilter = { gte: new Date(now.getTime() - 90 * 86_400_000) };
+    } else if (query?.dateRange === 'this_month') {
+      dateFilter = { gte: startOfMonth };
+    } else if (query?.dateRange === 'this_year') {
+      dateFilter = { gte: new Date(now.getFullYear(), 0, 1) };
+    } else if (query?.startDate || query?.endDate) {
+      dateFilter = {};
+      if (query.startDate) dateFilter.gte = new Date(query.startDate);
+      if (query.endDate) dateFilter.lte = new Date(query.endDate);
+    }
+
     const [
+      totalReceivables,
       totalBilled,
       totalCollected,
       totalOverdue,
@@ -82,38 +140,101 @@ export class ReportsService {
       promiseToPay,
       collectedThisMonth,
     ] = await Promise.all([
+      // Sum of all outstanding receivables (not PAID, CANCELLED, or DRAFT, with outstanding > 0)
       this.prisma.invoice.aggregate({
-        where: { tenantId, status: { not: 'CANCELLED' } },
-        _sum: { amount: true },
-      }),
-      this.prisma.payment.aggregate({
-        where: { tenantId, status: 'COMPLETED' },
-        _sum: { amount: true },
-      }),
-      this.prisma.invoice.aggregate({
-        where: { tenantId, status: 'OVERDUE' },
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: { notIn: ['PAID', 'CANCELLED', 'DRAFT'] },
+          outstanding: { gt: 0 },
+          ...(dateFilter ? { issueDate: dateFilter } : {}),
+        },
         _sum: { outstanding: true },
       }),
-      this.prisma.invoice.count({
-        where: { tenantId, status: { in: ['OPEN', 'PARTIALLY_PAID', 'OVERDUE'] } },
+      // Total Billed across active non-cancelled invoices
+      this.prisma.invoice.aggregate({
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: { notIn: ['CANCELLED', 'DRAFT'] },
+          ...(dateFilter ? { issueDate: dateFilter } : {}),
+        },
+        _sum: { amount: true },
       }),
-      this.prisma.customer.count({
-        where: { tenantId, invoices: { some: { status: 'OVERDUE' } } },
-      }),
-      this.prisma.paymentPromise.count({
-        where: { tenantId, status: 'PENDING' },
-      }),
+      // Total Collected amount across completed payments in selected dateRange (or all-time if all)
       this.prisma.payment.aggregate({
-        where: { tenantId, status: 'COMPLETED', paidAt: { gte: startOfMonth } },
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: 'COMPLETED',
+          ...(dateFilter ? { paidAt: dateFilter } : {}),
+        },
+        _sum: { amount: true },
+      }),
+      // Total Overdue outstanding (past due date or status OVERDUE, with outstanding > 0)
+      this.prisma.invoice.aggregate({
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: { notIn: ['PAID', 'CANCELLED', 'DRAFT'] },
+          outstanding: { gt: 0 },
+          OR: [{ status: 'OVERDUE' }, { dueDate: { lt: now } }],
+          ...(dateFilter ? { issueDate: dateFilter } : {}),
+        },
+        _sum: { outstanding: true },
+      }),
+      // Open Invoices count (strictly outstanding > 0)
+      this.prisma.invoice.count({
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: { in: ['OPEN', 'PARTIALLY_PAID', 'OVERDUE'] },
+          outstanding: { gt: 0 },
+          ...(dateFilter ? { issueDate: dateFilter } : {}),
+        },
+      }),
+      // Overdue Customers count (strictly outstanding > 0)
+      this.prisma.customer.count({
+        where: {
+          tenantId,
+          ...(role === 'AGENT' && assignedFilter.customerId ? { id: assignedFilter.customerId } : {}),
+          invoices: {
+            some: {
+              status: { notIn: ['PAID', 'CANCELLED', 'DRAFT'] },
+              outstanding: { gt: 0 },
+              OR: [{ status: 'OVERDUE' }, { dueDate: { lt: now } }],
+              ...(dateFilter ? { issueDate: dateFilter } : {}),
+            },
+          },
+        },
+      }),
+      // Pending Promises to Pay
+      this.prisma.paymentPromise.count({
+        where: {
+          tenantId,
+          ...(role === 'AGENT' && assignedFilter.customerId ? { invoice: { customerId: assignedFilter.customerId } } : {}),
+          status: 'PENDING',
+        },
+      }),
+      // Payments received this month
+      this.prisma.payment.aggregate({
+        where: {
+          tenantId,
+          ...assignedFilter,
+          status: 'COMPLETED',
+          paidAt: { gte: startOfMonth },
+        },
         _sum: { amount: true },
       }),
     ]);
 
-    const billed = Number(totalBilled._sum.amount ?? 0);
-    const collected = Number(totalCollected._sum.amount ?? 0);
-    const overdue = Number(totalOverdue._sum.outstanding ?? 0);
+    const billed = Number(totalBilled._sum?.amount ?? 0);
+    const collected = Number(totalCollected._sum?.amount ?? 0);
+    const receivables = Number(totalReceivables._sum?.outstanding ?? 0);
+    const overdue = Number(totalOverdue._sum?.outstanding ?? 0);
 
     return {
+      totalReceivables: receivables,
       totalBilled: billed,
       totalCollected: collected,
       totalOverdue: overdue,
@@ -121,7 +242,7 @@ export class ReportsService {
       overdueCustomers,
       promiseToPay,
       collectionRate: billed > 0 ? Math.round((collected / billed) * 1000) / 10 : 0,
-      collectedThisMonth: Number(collectedThisMonth._sum.amount ?? 0),
+      collectedThisMonth: Number(collectedThisMonth._sum?.amount ?? 0),
     };
   }
 
@@ -137,8 +258,19 @@ export class ReportsService {
       endDate?: string;
     },
   ): Promise<LedgerResult> {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
     const { customerId, startDate, endDate } = query;
+
+    let assignedFilter: any = {};
+    if (role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);
+      if (customerId && !allowedCustomerIds.includes(customerId)) {
+        throw new ForbiddenException('Access denied: You are not assigned to this customer');
+      }
+      if (!customerId) {
+        assignedFilter = { customerId: { in: allowedCustomerIds } };
+      }
+    }
 
     const start = startDate ? new Date(startDate) : undefined;
     const end = endDate ? new Date(endDate) : undefined;
@@ -150,6 +282,7 @@ export class ReportsService {
         this.prisma.invoice.aggregate({
           where: {
             tenantId,
+            ...assignedFilter,
             ...(customerId ? { customerId } : {}),
             status: { not: 'CANCELLED' },
             issueDate: { lt: start },
@@ -159,6 +292,7 @@ export class ReportsService {
         this.prisma.payment.aggregate({
           where: {
             tenantId,
+            ...assignedFilter,
             ...(customerId ? { customerId } : {}),
             status: 'COMPLETED',
             paidAt: { lt: start },
@@ -175,6 +309,7 @@ export class ReportsService {
     // 2. Fetch Invoices in period
     const invoiceWhere: any = {
       tenantId,
+      ...assignedFilter,
       status: { not: 'CANCELLED' },
     };
     if (customerId) invoiceWhere.customerId = customerId;
@@ -195,6 +330,7 @@ export class ReportsService {
     // 3. Fetch Payments in period
     const paymentWhere: any = {
       tenantId,
+      ...assignedFilter,
       status: 'COMPLETED',
     };
     if (customerId) paymentWhere.customerId = customerId;

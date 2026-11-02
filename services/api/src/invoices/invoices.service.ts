@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import type { InvoiceQueryDto } from '../common/dto/query.dto.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsString, IsNumber, IsDateString, IsOptional, IsEnum } from 'class-validator';
@@ -15,6 +16,7 @@ export class CreateInvoiceDto {
   @ApiProperty({ example: '2024-10-31' }) @IsDateString() dueDate: string;
   @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
   @ApiPropertyOptional({ default: 'INR' }) @IsOptional() @IsString() currency?: string;
+  @ApiPropertyOptional({ example: 'CUST-001' }) @IsOptional() @IsString() customerReference?: string;
 }
 
 export class UpdateInvoiceDto {
@@ -26,16 +28,51 @@ export class UpdateInvoiceDto {
 
 @Injectable()
 export class InvoicesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auditLogs?: AuditLogsService,
+  ) {}
+
+  private async getAgentCustomerIds(tenantId: string, userId: string): Promise<string[]> {
+    try {
+      const [assignedCases, assignedTasks] = await Promise.all([
+        this.prisma.collectionCase?.findMany
+          ? this.prisma.collectionCase.findMany({
+              where: { tenantId, assignedTo: userId },
+              select: { customerId: true },
+            })
+          : [],
+        this.prisma.followUpTask?.findMany
+          ? this.prisma.followUpTask.findMany({
+              where: { tenantId, assignedTo: userId, customerId: { not: null } },
+              select: { customerId: true },
+            })
+          : [],
+      ]);
+      const allowed = new Set<string>();
+      (assignedCases || []).forEach((c: any) => c.customerId && allowed.add(c.customerId));
+      (assignedTasks || []).forEach((t: any) => t.customerId && allowed.add(t.customerId));
+      return Array.from(allowed);
+    } catch {
+      return [];
+    }
+  }
 
   async findAll(user: AuthUser, query: InvoiceQueryDto) {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
+    let assignedFilter: any = {};
+    if (role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);
+      assignedFilter = { customerId: { in: allowedCustomerIds } };
+    }
+
     const where = {
       tenantId,
+      ...assignedFilter,
       ...(query.customerId ? { customerId: query.customerId } : {}),
       ...(query.status ? { status: query.status as any } : {}),
     };
@@ -55,10 +92,17 @@ export class InvoicesService {
   }
 
   async exportCsv(user: AuthUser, query: InvoiceQueryDto): Promise<string> {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
+
+    let assignedFilter: any = {};
+    if (role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);
+      assignedFilter = { customerId: { in: allowedCustomerIds } };
+    }
 
     const where = {
       tenantId,
+      ...assignedFilter,
       ...(query.customerId ? { customerId: query.customerId } : {}),
       ...(query.status ? { status: query.status as any } : {}),
     };
@@ -113,6 +157,13 @@ export class InvoicesService {
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
 
+    if (user.role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(user.tenantId, user.userId);
+      if (!allowedCustomerIds.includes(invoice.customerId)) {
+        throw new ForbiddenException('Access denied: You are not assigned to this invoice or customer');
+      }
+    }
+
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: user.tenantId },
       select: { name: true },
@@ -131,31 +182,104 @@ export class InvoicesService {
       },
     });
     if (!invoice) throw new NotFoundException('Invoice not found');
+
+    if (user.role === 'AGENT') {
+      const allowedCustomerIds = await this.getAgentCustomerIds(user.tenantId, user.userId);
+      if (!allowedCustomerIds.includes(invoice.customerId)) {
+        throw new ForbiddenException('Access denied: You are not assigned to this invoice or customer');
+      }
+    }
+
     return invoice;
   }
 
   async create(user: AuthUser, dto: CreateInvoiceDto) {
+    const { tenantId, userId, role } = user;
+
+    if (role === 'AGENT') {
+      throw new ForbiddenException('Agents are not authorized to create invoices');
+    }
+
     // Verify customer belongs to same tenant
     const customer = await this.prisma.customer.findFirst({
-      where: { id: dto.customerId, tenantId: user.tenantId },
+      where: { id: dto.customerId, tenantId },
     });
     if (!customer) throw new NotFoundException('Customer not found');
 
-    return this.prisma.invoice.create({
+    const amt = Number(dto.amount);
+    if (isNaN(amt) || amt <= 0) {
+      throw new BadRequestException('Invoice amount must be greater than 0');
+    }
+
+    const issueDate = new Date(dto.issueDate);
+    const dueDate = new Date(dto.dueDate);
+    if (isNaN(issueDate.getTime()) || isNaN(dueDate.getTime())) {
+      throw new BadRequestException('Invalid issue date or due date format');
+    }
+    if (dueDate < issueDate) {
+      throw new BadRequestException('Due date cannot be earlier than issue date');
+    }
+
+    const invNum = dto.number.trim().toUpperCase();
+    const existing = await this.prisma.invoice.findFirst({
+      where: { tenantId, number: invNum },
+    });
+    if (existing) {
+      throw new BadRequestException(`Invoice number '${invNum}' already exists in this tenant`);
+    }
+
+    const now = new Date();
+    const isOverdue = dueDate < now;
+    const status: InvoiceStatus = isOverdue ? 'OVERDUE' : 'OPEN';
+
+    const invoice = await this.prisma.invoice.create({
       data: {
-        ...dto,
-        amount: dto.amount,
-        outstanding: dto.amount,
-        status: 'OPEN',
-        issueDate: new Date(dto.issueDate),
-        dueDate: new Date(dto.dueDate),
+        number: invNum,
+        customerId: dto.customerId,
+        amount: amt,
+        outstanding: amt,
+        status,
+        issueDate,
+        dueDate,
+        description: dto.description,
         currency: dto.currency ?? 'INR',
-        tenantId: user.tenantId,
+        tenantId,
       },
     });
+
+    // Recalculate customer's outstanding balance from invoices
+    const unpaidInvoices = await this.prisma.invoice.findMany({
+      where: {
+        customerId: dto.customerId,
+        tenantId,
+        status: { in: ['OPEN', 'OVERDUE', 'PARTIALLY_PAID'] },
+      },
+      select: { outstanding: true },
+    });
+    const totalOutstanding = unpaidInvoices.reduce((sum, inv) => sum + Number(inv.outstanding), 0);
+    await this.prisma.customer.update({
+      where: { id: dto.customerId },
+      data: { outstandingBalance: totalOutstanding },
+    });
+
+    if (this.auditLogs) {
+      await this.auditLogs.log({
+        tenantId,
+        userId,
+        action: 'invoice.created',
+        entityType: 'Invoice',
+        entityId: invoice.id,
+        metadata: { number: invNum, amount: amt, customerId: dto.customerId },
+      });
+    }
+
+    return invoice;
   }
 
   async update(id: string, user: AuthUser, dto: UpdateInvoiceDto) {
+    if (user.role === 'AGENT') {
+      throw new ForbiddenException('Agents are not authorized to update invoices');
+    }
     await this.findOne(id, user);
     return this.prisma.invoice.update({
       where: { id },

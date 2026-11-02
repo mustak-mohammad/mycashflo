@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { validateEnvironment } from './common/env.validation.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { PrismaModule } from './prisma/prisma.module.js';
@@ -16,12 +17,24 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { IntelligenceModule } from './intelligence/intelligence.module.js';
 import { PromptsModule } from './prompts/prompts.module.js';
+import { IntegrationsModule } from './integrations/integrations.module.js';
+import { OnboardingModule } from './onboarding/onboarding.module.js';
+import { RemindersModule } from './reminders/reminders.module.js';
+import { UsersModule } from './users/users.module.js';
+import { ChotuModule } from './chotu/chotu.module.js';
+import { PlatformModule } from './platform/platform.module.js';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true, envFilePath: '.env' }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: '.env',
+      validate: validateEnvironment,
+    }),
     PrismaModule,
     AuthModule,
+    UsersModule,
+    PlatformModule,
     CustomersModule,
     InvoicesModule,
     CollectionsModule,
@@ -34,6 +47,10 @@ import { PromptsModule } from './prompts/prompts.module.js';
     NotificationsModule,
     IntelligenceModule,
     PromptsModule,
+    IntegrationsModule,
+    OnboardingModule,
+    RemindersModule,
+    ChotuModule,
   ],
   controllers: [AppController],
   providers: [AppService],

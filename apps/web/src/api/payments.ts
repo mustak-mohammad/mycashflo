@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { Paginated, Payment, PaymentStats } from '../types'
+import type { Paginated, Payment, PaymentStats, PaymentLinkResponse } from '../types'
 
 export const paymentsApi = {
   list: (params?: { page?: number; limit?: number; status?: string; method?: string }) =>
@@ -7,4 +7,29 @@ export const paymentsApi = {
 
   getStats: () =>
     apiClient.get<PaymentStats>('/payments/stats').then((r) => r.data),
+
+  createPaymentLink: (data: { invoiceId: string; provider?: 'RAZORPAY' | 'STRIPE'; description?: string }) =>
+    apiClient.post<PaymentLinkResponse>('/payments/link', data).then((r) => r.data),
+
+  recordPayment: (data: {
+    invoiceId: string
+    amount: number
+    paymentDate: string
+    reference: string
+    method?: string
+    notes?: string
+  }) => apiClient.post('/payments/record', data).then((r) => r.data),
+
+  recordPaymentClaim: (data: {
+    invoiceId: string
+    amount: number
+    paymentDate: string
+    reference: string
+    method?: string
+    notes?: string
+    evidenceUrl?: string
+  }) => apiClient.post('/payments/claim', data).then((r) => r.data),
+
+  verifyPaymentClaim: (id: string) =>
+    apiClient.post(`/payments/${id}/verify`).then((r) => r.data),
 }

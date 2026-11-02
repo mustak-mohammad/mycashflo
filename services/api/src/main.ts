@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import * as express from 'express';
 import { AppModule } from './app.module.js';
 
 async function bootstrap() {
@@ -16,11 +17,24 @@ async function bootstrap() {
   // Global prefix
   app.setGlobalPrefix('api');
 
+  // Increase JSON and URL-encoded body limit to 50MB to support audio recording blobs
+  // Preserve raw request body buffer for cryptographic webhook signature verification (e.g. Stripe, Razorpay)
+  app.use(
+    express.json({
+      limit: '50mb',
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
   // CORS — only allow the React dev server in development
   app.enableCors({
     origin: webOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+    exposedHeaders: ['Content-Disposition'],
     credentials: true,
   });
 

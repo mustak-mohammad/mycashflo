@@ -22,8 +22,16 @@ export class ReportsController {
 
   @Get('summary')
   @ApiOperation({ summary: 'KPI summary — billed, collected, overdue, rates' })
-  getSummary(@CurrentUser() user: AuthUser) {
-    return this.reportsService.getSummary(user);
+  @ApiQuery({ name: 'dateRange', required: false, enum: ['all', '30d', '90d', 'this_month', 'this_year'] })
+  @ApiQuery({ name: 'startDate', required: false, type: String })
+  @ApiQuery({ name: 'endDate', required: false, type: String })
+  getSummary(
+    @CurrentUser() user: AuthUser,
+    @Query('dateRange') dateRange?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    return this.reportsService.getSummary(user, { dateRange, startDate, endDate });
   }
 
   @Get('ledger')

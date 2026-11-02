@@ -3,6 +3,7 @@
 // In a future phase these can be generated automatically from the OpenAPI spec.
 
 export interface UserRole {
+  SUPER_ADMIN: 'SUPER_ADMIN'
   ADMIN: 'ADMIN'
   MANAGER: 'MANAGER'
   AGENT: 'AGENT'
@@ -12,7 +13,7 @@ export interface User {
   id: string
   email: string
   name: string
-  role: 'ADMIN' | 'MANAGER' | 'AGENT'
+  role: 'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'AGENT'
   tenantId: string
 }
 
@@ -297,5 +298,88 @@ export interface ConversationTurnResponse {
   outcome?: string
   extractedData: Record<string, any>
   actionExecuted?: string
+}
+
+// ── Phase 7: Integrations (Payment Links, WhatsApp, SIP Telephony) ───────────
+
+export type IntegrationProvider = 'RAZORPAY' | 'STRIPE' | 'WHATSAPP_CLOUD' | 'SIP_TELEPHONY'
+
+export interface IntegrationConfigItem {
+  id: string
+  provider: string
+  isActive: boolean
+  config: Record<string, any>
+  tenantId: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface PaymentLinkRequest {
+  invoiceId: string
+  provider?: 'RAZORPAY' | 'STRIPE'
+  description?: string
+}
+
+export interface PaymentLinkResponse {
+  paymentLinkId: string
+  provider: 'RAZORPAY' | 'STRIPE'
+  shortUrl: string
+  amount: number
+  currency: string
+  status: string
+  invoiceId: string
+  isSimulated: boolean
+}
+
+export interface TelephonyCallRequest {
+  customerId: string
+  phone?: string
+  collectionCaseId?: string
+  reason?: string
+}
+
+export interface TelephonyCallResponse {
+  callId: string
+  provider: string
+  status: string
+  isSimulated: boolean
+  message: string
+  sessionId?: string
+}
+export type CallOutcome =
+  | 'PROMISE_TO_PAY'
+  | 'DISPUTE'
+  | 'NO_CONTACT'
+  | 'CALLBACK_REQUESTED'
+  | 'RESOLVED'
+  | 'OTHER'
+  | 'WILL_PAY_LATER'
+  | 'UNABLE_TO_PAY'
+  | 'PAYMENT_CLAIMED'
+
+// ── Application-Wide Chotu AI Chatbot ─────────────────────────────────────────
+
+export interface ChotuChatMessage {
+  id: string
+  sender: 'user' | 'assistant'
+  text: string
+  timestamp: string
+  suggestedQuestions?: string[]
+  suggestedRoute?: string
+}
+
+export interface ChotuChatRequest {
+  message: string
+  conversationId?: string
+  currentPage?: string
+  selectedRecordId?: string
+}
+
+export interface ChotuChatResponse {
+  reply: string
+  suggestedQuestions: string[]
+  conversationId: string
+  dataUnavailable?: boolean
+  suggestedRoute?: string
 }
 

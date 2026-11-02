@@ -1,6 +1,8 @@
 import { Controller, Get, Post, Body, Param, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../auth/roles.guard.js';
+import { Roles } from '../auth/roles.decorator.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import {
@@ -9,10 +11,11 @@ import {
   RejectProposalDto,
   IntelligenceChatDto,
 } from './intelligence.service.js';
+import { UserRole } from '@prisma/client';
 
 @ApiTags('Intelligence')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('intelligence')
 export class IntelligenceController {
   constructor(private readonly intelligenceService: IntelligenceService) {}
@@ -44,6 +47,7 @@ export class IntelligenceController {
   }
 
   @Post('actions/:id/approve')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Approve and execute a pending consequential AI action' })
   async approveProposal(@CurrentUser() user: AuthUser, @Param('id') id: string) {
@@ -51,6 +55,7 @@ export class IntelligenceController {
   }
 
   @Post('actions/:id/reject')
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Reject a pending consequential AI action' })
   async rejectProposal(

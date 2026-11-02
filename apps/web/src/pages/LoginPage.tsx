@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useAuth } from '../store/AuthContext'
 import apiClient from '../api/client'
 import type { LoginResponse } from '../types'
+import { PasswordInput } from '../components/ui/PasswordInput'
 
 const schema = z.object({
   email: z.string().email('Enter a valid email'),
@@ -17,7 +18,7 @@ export default function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const from = (location.state as { from?: { pathname: string } })?.from?.pathname ?? '/dashboard'
+  const requestedFrom = (location.state as { from?: { pathname: string } })?.from?.pathname
   const [serverError, setServerError] = useState<string | null>(null)
   const [googleLoading, setGoogleLoading] = useState<boolean>(false)
   const [isSignUp, setIsSignUp] = useState<boolean>(false)
@@ -29,12 +30,19 @@ export default function LoginPage() {
     formState: { errors, isSubmitting },
   } = useForm<FormData>({ resolver: zodResolver(schema) })
 
+  function getRedirectDestination(userRole?: string): string {
+    if (requestedFrom && requestedFrom !== '/' && requestedFrom !== '/login') {
+      return requestedFrom
+    }
+    return userRole === 'SUPER_ADMIN' ? '/platform/overview' : '/dashboard'
+  }
+
   async function onSubmit(data: FormData) {
     setServerError(null)
     try {
       const res = await apiClient.post<LoginResponse>('/auth/login', data)
-      login(res.data.user, res.data.tokens.accessToken)
-      navigate(from, { replace: true })
+      login(res.data.user, res.data.tokens.accessToken, res.data.tokens.refreshToken)
+      navigate(getRedirectDestination(res.data.user.role), { replace: true })
     } catch (err: unknown) {
       const msg =
         (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
@@ -59,8 +67,8 @@ export default function LoginPage() {
         email,
         name,
       })
-      login(res.data.user, res.data.tokens.accessToken)
-      navigate(from, { replace: true })
+      login(res.data.user, res.data.tokens.accessToken, res.data.tokens.refreshToken)
+      navigate(getRedirectDestination(res.data.user.role), { replace: true })
     }
 
     try {
@@ -274,9 +282,8 @@ export default function LoginPage() {
               >
                 Password
               </label>
-              <input
+              <PasswordInput
                 id="password"
-                type="password"
                 autoComplete="current-password"
                 {...register('password')}
                 className="w-full px-4 py-3 rounded-lg text-sm text-white outline-none transition-all"

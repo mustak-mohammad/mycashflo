@@ -11,21 +11,24 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../auth/roles.guard.js';
+import { Roles } from '../auth/roles.decorator.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { InvoicesService, CreateInvoiceDto, UpdateInvoiceDto } from './invoices.service.js';
 import { InvoiceQueryDto } from '../common/dto/query.dto.js';
+import { UserRole } from '@prisma/client';
 import type { Response } from 'express';
 
 @ApiTags('invoices')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('invoices')
 export class InvoicesController {
   constructor(private readonly invoicesService: InvoicesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List all invoices for the tenant' })
+  @ApiOperation({ summary: 'List invoices for the tenant (scoped to assigned customers for Agents)' })
   findAll(@CurrentUser() user: AuthUser, @Query() query: InvoiceQueryDto) {
     return this.invoicesService.findAll(user, query);
   }
@@ -52,19 +55,21 @@ export class InvoicesController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get invoice by ID' })
+  @ApiOperation({ summary: 'Get invoice by ID (assigned only for Agents)' })
   findOne(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     return this.invoicesService.findOne(id, user);
   }
 
   @Post()
-  @ApiOperation({ summary: 'Create a new invoice' })
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Create a new invoice (Admin/Manager only)' })
   create(@CurrentUser() user: AuthUser, @Body() dto: CreateInvoiceDto) {
     return this.invoicesService.create(user, dto);
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update invoice status or details' })
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Update invoice status or details (Admin/Manager only)' })
   update(
     @Param('id') id: string,
     @CurrentUser() user: AuthUser,

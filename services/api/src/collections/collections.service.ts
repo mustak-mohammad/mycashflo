@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsOptional, IsEnum, IsString } from 'class-validator';
@@ -28,17 +28,51 @@ export class CollectionsService {
   constructor(private readonly prisma: PrismaService) {}
 
   async findAll(user: AuthUser, query: CollectionQueryDto) {
-    const { tenantId } = user;
+    const { tenantId, role, userId } = user;
     const page = query.page ?? 1;
     const limit = Math.min(query.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
+    // For AGENT, strictly scope cases to assignedTo: userId
+    const assignedFilter =
+      role === 'AGENT'
+        ? { assignedTo: userId }
+        : query.assignedTo
+        ? { assignedTo: query.assignedTo }
+        : {};
+
     const where = {
       tenantId,
+      ...assignedFilter,
       ...(query.status ? { status: query.status } : {}),
       ...(query.priority ? { priority: query.priority } : {}),
-      ...(query.assignedTo ? { assignedTo: query.assignedTo } : {}),
     };
+
+    // Auto-reconcile any stale open/in-progress collection cases for fully settled invoices or customers
+    try {
+      if (this.prisma.collectionCase?.findMany) {
+        const staleCases = await this.prisma.collectionCase.findMany({
+          where: {
+            tenantId,
+            status: { in: ['OPEN', 'IN_PROGRESS'] },
+            OR: [
+              { invoice: { status: 'PAID' } },
+              { invoice: { outstanding: { lte: 0 } } },
+              { invoiceId: null, customer: { outstandingBalance: { lte: 0 } } },
+            ],
+          },
+          select: { id: true },
+        });
+        if (staleCases.length > 0 && this.prisma.collectionCase.updateMany) {
+          await this.prisma.collectionCase.updateMany({
+            where: { id: { in: staleCases.map((c) => c.id) } },
+            data: { status: 'RESOLVED', resolvedAt: new Date() },
+          });
+        }
+      }
+    } catch {
+      // Safe fallback
+    }
 
     const [data, total] = await Promise.all([
       this.prisma.collectionCase.findMany({
@@ -56,10 +90,20 @@ export class CollectionsService {
       this.prisma.collectionCase.count({ where }),
     ]);
 
-    // Summary counts
+    // Summary counts (scoped to agent if applicable)
+    const summaryWhere = {
+      tenantId,
+      ...assignedFilter,
+    };
     const [openCount, highCount] = await Promise.all([
-      this.prisma.collectionCase.count({ where: { tenantId, status: { in: ['OPEN', 'IN_PROGRESS'] } } }),
-      this.prisma.collectionCase.count({ where: { tenantId, priority: { in: ['HIGH', 'URGENT'] } } }),
+      this.prisma.collectionCase.count({ where: { ...summaryWhere, status: { in: ['OPEN', 'IN_PROGRESS'] } } }),
+      this.prisma.collectionCase.count({
+        where: {
+          ...summaryWhere,
+          status: { in: ['OPEN', 'IN_PROGRESS'] },
+          priority: { in: ['HIGH', 'URGENT'] },
+        },
+      }),
     ]);
 
     return { data, total, page, limit, summary: { openCount, highCount } };
@@ -78,13 +122,25 @@ export class CollectionsService {
       },
     });
     if (!c) throw new NotFoundException('Collection case not found');
+
+    if (user.role === 'AGENT' && c.assignedTo !== user.userId) {
+      throw new ForbiddenException('Access denied: You are not assigned to this collection case');
+    }
+
     return c;
   }
 
   async patch(id: string, user: AuthUser, dto: PatchCollectionCaseDto) {
-    await this.findOne(id, user);
+    const c = await this.findOne(id, user);
+
+    if (user.role === 'AGENT') {
+      if (dto.assignedTo && dto.assignedTo !== user.userId) {
+        throw new ForbiddenException('Agents are not authorized to reassign collection cases');
+      }
+    }
+
     return this.prisma.collectionCase.update({
-      where: { id },
+      where: { id: c.id },
       data: { ...dto, ...(dto.status === 'RESOLVED' ? { resolvedAt: new Date() } : {}) },
     });
   }

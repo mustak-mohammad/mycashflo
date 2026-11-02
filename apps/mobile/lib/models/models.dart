@@ -258,3 +258,64 @@ class AuditLogItem {
   }
 }
 
+// ── Phase 7: Integration Models ──────────────────────────────────────────────
+
+class PaymentLinkItem {
+  final String paymentLinkId;
+  final String provider;
+  final String shortUrl;
+  final double amount;
+  final String currency;
+  final String status;
+  final bool isSimulated;
+
+  PaymentLinkItem({
+    required this.paymentLinkId,
+    required this.provider,
+    required this.shortUrl,
+    required this.amount,
+    required this.currency,
+    required this.status,
+    required this.isSimulated,
+  });
+
+  factory PaymentLinkItem.fromJson(Map<String, dynamic> json) {
+    return PaymentLinkItem(
+      paymentLinkId: json['paymentLinkId'] ?? json['id'] ?? '',
+      provider: json['provider'] ?? 'RAZORPAY',
+      shortUrl: json['shortUrl'] ?? json['url'] ?? '',
+      amount: (json['amount'] as num?)?.toDouble() ?? 0.0,
+      currency: json['currency'] ?? 'INR',
+      status: json['status'] ?? 'CREATED',
+      isSimulated: json['isSimulated'] ?? true,
+    );
+  }
+}
+
+class TelephonyCallSession {
+  final String callSid;
+  final String provider;
+  final String status;
+  final bool isSimulated;
+  final String notes;
+
+  TelephonyCallSession({
+    required this.callSid,
+    required this.provider,
+    required this.status,
+    required this.isSimulated,
+    required this.notes,
+  });
+
+  factory TelephonyCallSession.fromJson(Map<String, dynamic> json) {
+    return TelephonyCallSession(
+      callSid: json['callSid'] ?? '',
+      provider: json['provider'] ?? 'SIP_GATEWAY',
+      status: json['status'] ?? 'SIMULATED',
+      isSimulated: json['isSimulated'] ?? true,
+      notes: json['notes'] ?? '',
+    );
+  }
+}
+
+

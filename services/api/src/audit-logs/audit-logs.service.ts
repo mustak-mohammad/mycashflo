@@ -55,14 +55,36 @@ export class AuditLogsService {
 
   async log(params: CreateAuditLogParams) {
     try {
+      let resolvedUserId = params.userId;
+      const userExists = await this.prisma.user.findFirst({
+        where: { id: params.userId, tenantId: params.tenantId },
+        select: { id: true },
+      });
+
+      if (!userExists) {
+        const tenantUser = await this.prisma.user.findFirst({
+          where: { tenantId: params.tenantId },
+          orderBy: { role: 'asc' },
+          select: { id: true },
+        });
+        if (tenantUser) {
+          resolvedUserId = tenantUser.id;
+        } else {
+          return null;
+        }
+      }
+
       return await this.prisma.auditLog.create({
         data: {
           tenantId: params.tenantId,
-          userId: params.userId,
+          userId: resolvedUserId,
           action: params.action,
           entityType: params.entityType,
           entityId: params.entityId,
-          metadata: params.metadata ?? {},
+          metadata: {
+            ...(params.metadata ?? {}),
+            ...(resolvedUserId !== params.userId ? { actor: params.userId } : {}),
+          },
           ipAddress: params.ipAddress,
         },
       });

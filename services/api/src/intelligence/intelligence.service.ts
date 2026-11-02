@@ -167,6 +167,65 @@ export class IntelligenceService {
           required: ['customerId', 'channel', 'template'],
         },
       },
+      {
+        name: 'record_cease_contact',
+        description: 'Record customer cease-contact / do-not-contact (DND) request, stopping further automated outreach calls.',
+        isConsequential: false,
+        riskLevel: ActionRisk.LOW,
+        parameters: {
+          type: 'object',
+          properties: {
+            customerId: { type: 'string', description: 'Customer ID' },
+            reason: { type: 'string', description: 'Reason or statement for ceasing contact' },
+            channel: { type: 'string', description: 'Channel preference (default ALL)' },
+          },
+          required: ['customerId'],
+        },
+      },
+      {
+        name: 'create_customer',
+        description: 'Create a new customer account with name, phone, optional email, company, and tax details. Requires human confirmation.',
+        isConsequential: true,
+        riskLevel: ActionRisk.MEDIUM,
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Customer or business name' },
+            phone: { type: 'string', description: 'Primary phone number' },
+            email: { type: 'string', description: 'Optional email address' },
+            company: { type: 'string', description: 'Optional company name' },
+            customerReference: { type: 'string', description: 'Optional customer internal code/ref' },
+            gstNumber: { type: 'string', description: 'Optional GSTIN / Tax identifier' },
+            billingAddress: { type: 'string', description: 'Optional billing address' },
+          },
+          required: ['name', 'phone'],
+        },
+      },
+      {
+        name: 'customize_dashboard',
+        description: 'Update and save tenant dashboard preferences (visible/hidden widgets, date range, aging threshold) without modifying financial records.',
+        isConsequential: false,
+        riskLevel: ActionRisk.LOW,
+        parameters: {
+          type: 'object',
+          properties: {
+            hiddenWidgets: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'List of widget IDs to hide (e.g. aging_breakdown, recent_payments)',
+            },
+            dateRange: {
+              type: 'string',
+              enum: ['all', '30d', '90d', 'this_month', 'this_year'],
+              description: 'Dashboard date filter',
+            },
+            agingThreshold: {
+              type: 'number',
+              description: 'Overdue aging threshold in days (e.g. 15, 30, 45, 60)',
+            },
+          },
+        },
+      },
     ];
   }
 
@@ -254,6 +313,18 @@ export class IntelligenceService {
 
       case 'dispatch_reminder':
         result = await this.toolDispatchReminder(user, parameters);
+        break;
+
+      case 'record_cease_contact':
+        result = await this.toolRecordCeaseContact(user, parameters);
+        break;
+
+      case 'create_customer':
+        result = await this.toolCreateCustomer(user, parameters);
+        break;
+
+      case 'customize_dashboard':
+        result = await this.toolCustomizeDashboard(user, parameters);
         break;
 
       default:
@@ -545,12 +616,184 @@ export class IntelligenceService {
   }
 
   private async toolDispatchReminder(user: AuthUser, params: any) {
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: params.customerId, tenantId: user.tenantId },
+    });
+    if (customer?.notes?.includes('DND:NO_CONTACT')) {
+      throw new BadRequestException('Outreach suppressed: Customer has an active Do-Not-Contact (cease-contact) preference');
+    }
+
     return this.notifications.dispatch(user, {
       customerId: params.customerId,
       channel: params.channel,
       template: params.template,
       payload: params.payload,
     });
+  }
+
+  private async toolRecordCeaseContact(user: AuthUser, params: any) {
+    const { tenantId, userId } = user;
+    if (!params.customerId) {
+      throw new BadRequestException('customerId is required to record cease contact');
+    }
+
+    const customer = await this.prisma.customer.findFirst({
+      where: { id: params.customerId, tenantId },
+    });
+
+    if (!customer) {
+      throw new NotFoundException('Customer not found in tenant');
+    }
+
+    const timestamp = new Date().toISOString();
+    const reasonText = params.reason ? `: ${params.reason}` : '';
+    const dndTag = `[DND:NO_CONTACT${reasonText} - Recorded on ${timestamp}]`;
+    const updatedNotes = customer.notes ? `${dndTag}\n${customer.notes}` : dndTag;
+
+    const updatedCustomer = await this.prisma.customer.update({
+      where: { id: customer.id },
+      data: {
+        notes: updatedNotes,
+      },
+    });
+
+    await this.auditLogs.log({
+      tenantId,
+      userId,
+      action: 'customer.cease_contact_recorded',
+      entityType: 'Customer',
+      entityId: customer.id,
+      metadata: {
+        reason: params.reason || 'Cease contact requested',
+        recordedAt: timestamp,
+        channel: params.channel || 'ALL',
+      },
+    });
+
+    return {
+      success: true,
+      customerId: customer.id,
+      dndActive: true,
+      contactPreference: 'NO_CONTACT',
+      recordedAt: timestamp,
+      notes: updatedCustomer.notes,
+    };
+  }
+
+  private async toolCreateCustomer(user: AuthUser, params: any) {
+    const { tenantId, userId } = user;
+    if (!params.name || typeof params.name !== 'string' || !params.name.trim()) {
+      throw new BadRequestException('Customer name is required');
+    }
+    if (!params.phone || typeof params.phone !== 'string' || !params.phone.trim()) {
+      throw new BadRequestException('Customer phone number is required');
+    }
+
+    const trimmedName = params.name.trim();
+    const trimmedPhone = params.phone.trim();
+    const trimmedEmail = params.email && typeof params.email === 'string' ? params.email.trim() : null;
+
+    // Check duplicate phone or email in this tenant
+    const existing = await this.prisma.customer.findFirst({
+      where: {
+        tenantId,
+        OR: [
+          { phone: trimmedPhone },
+          ...(trimmedEmail ? [{ email: trimmedEmail }] : []),
+        ],
+      },
+    });
+
+    if (existing) {
+      throw new BadRequestException(
+        `A customer with phone '${trimmedPhone}'${trimmedEmail ? ` or email '${trimmedEmail}'` : ''} already exists in this tenant`,
+      );
+    }
+
+    const customer = await this.prisma.customer.create({
+      data: {
+        name: trimmedName,
+        phone: trimmedPhone,
+        email: trimmedEmail,
+        company: params.company && typeof params.company === 'string' ? params.company.trim() : null,
+        customerReference: params.customerReference && typeof params.customerReference === 'string' ? params.customerReference.trim() : null,
+        gstNumber: params.gstNumber && typeof params.gstNumber === 'string' ? params.gstNumber.trim().toUpperCase() : null,
+        billingAddress: params.billingAddress && typeof params.billingAddress === 'string' ? params.billingAddress.trim() : null,
+        outstandingBalance: 0,
+        currency: 'INR',
+        status: 'ACTIVE',
+        tenantId,
+      },
+    });
+
+    await this.auditLogs.log({
+      tenantId,
+      userId,
+      action: 'ai.customer_created',
+      entityType: 'Customer',
+      entityId: customer.id,
+      metadata: {
+        customerId: customer.id,
+        name: customer.name,
+        phone: customer.phone,
+        email: customer.email,
+        company: customer.company,
+      },
+    });
+
+    return {
+      customer,
+      message: `Customer "${customer.name}" created successfully.`,
+    };
+  }
+
+  private async toolCustomizeDashboard(user: AuthUser, params: any) {
+    const { tenantId, userId } = user;
+
+    // Financial records are strictly read-only and will NEVER be touched by dashboard customization
+    const existingConfig = await this.prisma.integrationConfig.findFirst({
+      where: { tenantId, provider: 'DASHBOARD_PREFERENCES' },
+    });
+
+    const currentConfig = (existingConfig?.config as any) || {};
+    const updatedPreferences = {
+      hiddenWidgets: params.hiddenWidgets !== undefined ? params.hiddenWidgets : (currentConfig.hiddenWidgets || []),
+      dateRange: params.dateRange || currentConfig.dateRange || 'all',
+      agingThreshold: params.agingThreshold !== undefined ? Number(params.agingThreshold) : (currentConfig.agingThreshold || 30),
+      customPreferences: params.customPreferences || currentConfig.customPreferences || {},
+      updatedAt: new Date().toISOString(),
+    };
+
+    let configRecord;
+    if (existingConfig) {
+      configRecord = await this.prisma.integrationConfig.update({
+        where: { id: existingConfig.id },
+        data: { config: updatedPreferences },
+      });
+    } else {
+      configRecord = await this.prisma.integrationConfig.create({
+        data: {
+          tenantId,
+          provider: 'DASHBOARD_PREFERENCES',
+          config: updatedPreferences,
+          isEnabled: true,
+        },
+      });
+    }
+
+    await this.auditLogs.log({
+      tenantId,
+      userId,
+      action: 'ai.dashboard_customized',
+      entityType: 'IntegrationConfig',
+      entityId: configRecord.id,
+      metadata: { preferences: updatedPreferences },
+    });
+
+    return {
+      preferences: updatedPreferences,
+      message: 'Dashboard preferences updated successfully without modifying financial records.',
+    };
   }
 
   // ── Action Proposals Management ────────────────────────────────────────────
@@ -668,7 +911,82 @@ export class IntelligenceService {
     const { tenantId } = user;
     const query = dto.message.toLowerCase();
 
-    // 1. Identify customer if not passed explicitly
+    // 1. Intent recognition & tool routing: Add Customer Action (Consequential, requires confirmation)
+    if (query.includes('add customer') || query.includes('create customer') || query.includes('new customer')) {
+      const nameMatch = dto.message.match(/(?:add|create|new)\s+customer\s+([A-Za-z0-9\s&.-]+?)(?:\s+with|\s+phone|\s+email|$)/i);
+      const phoneMatch = dto.message.match(/phone\s*[:=]?\s*([+0-9\s-]{10,15})/i);
+      const emailMatch = dto.message.match(/email\s*[:=]?\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+
+      const extractedName = nameMatch ? nameMatch[1].trim() : '';
+      const extractedPhone = phoneMatch ? phoneMatch[1].trim().replace(/\s+/g, '') : '';
+      const extractedEmail = emailMatch ? emailMatch[1].trim() : '';
+
+      if (!extractedName || !extractedPhone) {
+        return {
+          reply: "To add a new customer, please provide at least the customer's name and phone number (e.g. 'Add customer Acme Corp with phone +919876543210 and email contact@acme.com'). All additions require your explicit review and confirmation before being created.",
+          toolCalled: null,
+          data: null,
+        };
+      }
+
+      const proposalResult = await this.executeTool(user, {
+        toolName: 'create_customer',
+        parameters: {
+          name: extractedName,
+          phone: extractedPhone,
+          email: extractedEmail || undefined,
+        },
+        confirmed: false,
+      });
+
+      return {
+        reply: `I have prepared a proposal to add customer "${extractedName}". Because this modifies tenant records, please review and confirm the action below before it takes effect.`,
+        toolCalled: 'create_customer',
+        actionProposal: proposalResult.proposal,
+        requiresConfirmation: true,
+        data: proposalResult,
+      };
+    }
+
+    // 2. Intent recognition & tool routing: Dashboard Customization & Filtering (Read-only on financials)
+    if (
+      query.includes('filter dashboard') ||
+      query.includes('dashboard filter') ||
+      query.includes('aging threshold') ||
+      query.includes('hide widget') ||
+      query.includes('show widget') ||
+      query.includes('customize dashboard')
+    ) {
+      let dateRange: string | undefined;
+      if (query.includes('30d') || query.includes('30 days')) dateRange = '30d';
+      else if (query.includes('90d') || query.includes('90 days')) dateRange = '90d';
+      else if (query.includes('month')) dateRange = 'this_month';
+      else if (query.includes('year')) dateRange = 'this_year';
+      else if (query.includes('all')) dateRange = 'all';
+
+      let agingThreshold: number | undefined;
+      const thresholdMatch = query.match(/(\d+)\s*days?/);
+      if (thresholdMatch) {
+        agingThreshold = parseInt(thresholdMatch[1], 10);
+      }
+
+      const result = await this.executeTool(user, {
+        toolName: 'customize_dashboard',
+        parameters: {
+          dateRange,
+          agingThreshold,
+        },
+        confirmed: true,
+      });
+
+      return {
+        reply: `Updated dashboard preferences (date filter: ${dateRange || 'default'}, aging threshold: ${agingThreshold || 30} days). No financial records were modified.`,
+        toolCalled: 'customize_dashboard',
+        data: result.result,
+      };
+    }
+
+    // 3. Identify customer if not passed explicitly
     let customer: any = null;
     if (dto.customerId) {
       customer = await this.prisma.customer.findFirst({
@@ -677,15 +995,15 @@ export class IntelligenceService {
     }
 
     if (!customer) {
-      const allCustomers = await this.prisma.customer.findMany({ where: { tenantId } });
+      const allCustomers = (await this.prisma.customer.findMany({ where: { tenantId } })) || [];
       customer = allCustomers.find(
-        (c) =>
+        (c: any) =>
           query.includes(c.name.toLowerCase()) ||
           (c.company && query.includes(c.company.toLowerCase())),
       );
     }
 
-    // 2. Intent recognition & tool routing
+    // 4. Customer-specific queries
     if (customer) {
       if (
         query.includes('balance') ||
@@ -726,7 +1044,7 @@ export class IntelligenceService {
     // Fallback response with helpful guide
     return {
       reply:
-        "I'm Chotu Intelligence. You can ask me about customer balances, overdue invoices, account summaries, or ask me to draft payment reminders. For example: 'What is the balance for Raj Enterprises?'",
+        "I'm Chotu Intelligence. You can ask me to look up customer balances, overdue invoices, account summaries, customize your dashboard view (e.g., 'filter dashboard for 30 days'), or add new customers (e.g., 'Add customer Acme Corp with phone +919876543210').",
       toolCalled: null,
       data: null,
     };
@@ -734,6 +1052,12 @@ export class IntelligenceService {
 
   private generateActionSummary(toolName: string, params: any): string {
     switch (toolName) {
+      case 'create_customer':
+        return `Add new customer "${params.name}" (Phone: ${params.phone || 'N/A'}, Email: ${params.email || 'N/A'}, Company: ${params.company || 'N/A'})`;
+
+      case 'customize_dashboard':
+        return `Update dashboard preferences without modifying financial records (dateRange: ${params.dateRange || 'unchanged'}, agingThreshold: ${params.agingThreshold || 'unchanged'})`;
+
       case 'record_payment_promise':
         const amount = params.promisedAmount ? `₹${Number(params.promisedAmount).toLocaleString('en-IN')}` : 'unspecified amount';
         const date = params.promisedDate ? new Date(params.promisedDate).toLocaleDateString('en-IN') : 'agreed date';

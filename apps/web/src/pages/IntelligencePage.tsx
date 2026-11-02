@@ -1,13 +1,10 @@
 import { useState, useEffect } from 'react'
 import { PageHeader } from '../components/ui/PageHeader'
 import {
-  getAiTools,
   getPendingActionProposals,
   getAllActionProposals,
   approveActionProposal,
   rejectActionProposal,
-  executeAiTool,
-  sendIntelligenceChat,
 } from '../api/intelligence'
 import {
   getNotifications,
@@ -21,7 +18,6 @@ import { getAuditLogs } from '../api/auditLogs'
 import { customersApi } from '../api/customers'
 import type {
   ActionProposal,
-  AiToolDefinition,
   Notification,
   AuditLog,
   Customer,
@@ -29,7 +25,7 @@ import type {
 } from '../../../../packages/shared-types'
 
 export default function IntelligencePage() {
-  const [activeTab, setActiveTab] = useState<'approvals' | 'reminders' | 'tools' | 'audit'>('approvals')
+  const [activeTab, setActiveTab] = useState<'approvals' | 'reminders' | 'audit'>('approvals')
 
   // Approvals State
   const [pendingProposals, setPendingProposals] = useState<ActionProposal[]>([])
@@ -51,18 +47,6 @@ export default function IntelligencePage() {
   const [reminderEngineResult, setReminderEngineResult] = useState<TriggerRemindersResult | null>(null)
   const [runningEngine, setRunningEngine] = useState(false)
 
-  // Tools & Chat State
-  const [tools, setTools] = useState<AiToolDefinition[]>([])
-  const [selectedTool, setSelectedTool] = useState<AiToolDefinition | null>(null)
-  const [toolParamsInput, setToolParamsInput] = useState('{\n  "customerId": ""\n}')
-  const [toolResult, setToolResult] = useState<any>(null)
-  const [runningTool, setRunningTool] = useState(false)
-  const [chatMessages, setChatMessages] = useState<Array<{ sender: 'user' | 'ai'; text: string; toolCalled?: string }>>([
-    { sender: 'ai', text: 'Hello! I am Chotu Collections Intelligence. Ask me about any customer balance, overdue invoices, or account summaries.' },
-  ])
-  const [chatInput, setChatInput] = useState('')
-  const [chatLoading, setChatLoading] = useState(false)
-
   // Audit Logs State
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [auditFilterAction, setAuditFilterAction] = useState('')
@@ -79,7 +63,6 @@ export default function IntelligencePage() {
   useEffect(() => {
     loadApprovals()
     loadReminders()
-    loadTools()
     loadAuditLogs()
   }, [])
 
@@ -111,18 +94,6 @@ export default function IntelligencePage() {
       setCustomers(custsRes.data as any)
       if (custsRes.data.length > 0 && !dispatchCustomer) {
         setDispatchCustomer(custsRes.data[0].id)
-      }
-    } catch (err: any) {
-      console.error(err)
-    }
-  }
-
-  async function loadTools() {
-    try {
-      const list = await getAiTools()
-      setTools(list)
-      if (list.length > 0) {
-        setSelectedTool(list[0])
       }
     } catch (err: any) {
       console.error(err)
@@ -208,69 +179,11 @@ export default function IntelligencePage() {
     }
   }
 
-  // Handle Tool Execution
-  async function handleExecuteTool() {
-    if (!selectedTool) return
-    setRunningTool(true)
-    setToolResult(null)
-    try {
-      let parsed = {}
-      try {
-        parsed = JSON.parse(toolParamsInput)
-      } catch (e) {
-        throw new Error('Invalid JSON format in parameters')
-      }
-      const res = await executeAiTool({
-        toolName: selectedTool.name,
-        parameters: parsed,
-        confirmed: false,
-      })
-      setToolResult(res)
-      if (res.status === 'REQUIRES_CONFIRMATION') {
-        showAlert(`Action requires confirmation: Proposal #${res.proposal?.id} created`, 'error')
-        loadApprovals()
-      } else {
-        showAlert(`Tool '${selectedTool.name}' executed successfully!`)
-      }
-      loadAuditLogs()
-    } catch (err: any) {
-      setToolResult({ error: err.response?.data?.message || err.message })
-      showAlert(err.response?.data?.message || err.message, 'error')
-    } finally {
-      setRunningTool(false)
-    }
-  }
-
-  // Handle Assistant Chat
-  async function handleSendChat(e: React.FormEvent) {
-    e.preventDefault()
-    if (!chatInput.trim()) return
-    const msg = chatInput.trim()
-    setChatMessages((prev) => [...prev, { sender: 'user', text: msg }])
-    setChatInput('')
-    setChatLoading(true)
-    try {
-      const res = await sendIntelligenceChat(msg)
-      setChatMessages((prev) => [
-        ...prev,
-        { sender: 'ai', text: res.reply, toolCalled: res.toolCalled ?? undefined },
-      ])
-      loadAuditLogs()
-    } catch (err: any) {
-      setChatMessages((prev) => [
-        ...prev,
-        { sender: 'ai', text: `Error: ${err.response?.data?.message || err.message}` },
-      ])
-    } finally {
-      setChatLoading(false)
-    }
-  }
-
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
       <PageHeader
         title="Collections Intelligence"
-        subtitle="AI tool execution, human-in-the-loop action approval, multi-channel reminders, and audit logging."
+        subtitle="Human-in-the-loop action approval, multi-channel reminders, and audit logging."
       />
 
       {/* Alert Banner */}
@@ -294,7 +207,6 @@ export default function IntelligencePage() {
         {[
           { key: 'approvals', label: `Pending Approvals (${pendingProposals.length})`, icon: '🛡️' },
           { key: 'reminders', label: 'Multi-Channel Reminders', icon: '📬' },
-          { key: 'tools', label: 'AI Tools & Assistant', icon: '⚡' },
           { key: 'audit', label: 'Audit Trail', icon: '📜' },
         ].map((tab) => (
           <button
@@ -661,136 +573,7 @@ export default function IntelligencePage() {
         </div>
       )}
 
-      {/* ── Tab 3: AI Tools & Assistant ────────────────────────────────────── */}
-      {activeTab === 'tools' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Tool Executor Bench */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4">
-            <h3 className="text-sm font-semibold text-white">AI Tools Catalog & Test Bench</h3>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-white/60 mb-1">Select AI Tool</label>
-                <select
-                  value={selectedTool?.name}
-                  onChange={(e) => {
-                    const t = tools.find((item) => item.name === e.target.value)
-                    if (t) {
-                      setSelectedTool(t)
-                      const sampleParams: any = {}
-                      for (const k of t.parameters.required || []) {
-                        sampleParams[k] = k === 'customerId' && customers.length > 0 ? customers[0].id : ''
-                      }
-                      setToolParamsInput(JSON.stringify(sampleParams, null, 2))
-                    }
-                  }}
-                  className="w-full p-2.5 bg-black/40 border border-white/10 rounded-xl text-white text-xs focus:outline-none focus:border-indigo-500 font-mono"
-                >
-                  {tools.map((t) => (
-                    <option key={t.name} value={t.name}>
-                      {t.name} {t.isConsequential ? '⚠️ (Consequential)' : '✓ (Safe)'}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedTool && (
-                <div className="p-3 bg-white/[0.02] border border-white/5 rounded-xl space-y-1 text-xs">
-                  <div className="text-white/80">{selectedTool.description}</div>
-                  <div className="flex items-center gap-3 mt-2 text-[10px] text-white/50">
-                    <span>
-                      Type:{' '}
-                      <strong className={selectedTool.isConsequential ? 'text-amber-400' : 'text-emerald-400'}>
-                        {selectedTool.isConsequential ? 'Consequential (Needs Confirmation)' : 'Read-Only (Auto-run)'}
-                      </strong>
-                    </span>
-                    <span>Risk: {selectedTool.riskLevel}</span>
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs text-white/60 mb-1">Parameters (JSON)</label>
-                <textarea
-                  value={toolParamsInput}
-                  onChange={(e) => setToolParamsInput(e.target.value)}
-                  className="w-full h-32 p-3 bg-black/60 border border-white/10 rounded-xl text-xs font-mono text-indigo-200 focus:outline-none focus:border-indigo-500 resize-none"
-                />
-              </div>
-
-              <button
-                onClick={handleExecuteTool}
-                disabled={runningTool || !selectedTool}
-                className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs transition-colors shadow-lg shadow-indigo-900/30 disabled:opacity-50 cursor-pointer"
-              >
-                {runningTool ? 'Executing...' : '▶ Execute Tool'}
-              </button>
-
-              {toolResult && (
-                <div className="space-y-1">
-                  <span className="text-[10px] text-white/40 uppercase font-mono">Execution Response</span>
-                  <pre className="p-3 bg-black/60 border border-white/10 rounded-xl text-xs font-mono text-emerald-300 overflow-x-auto max-h-48">
-                    {JSON.stringify(toolResult, null, 2)}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Natural Language Collections Assistant */}
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-6 flex flex-col h-[560px]">
-            <h3 className="text-sm font-semibold text-white mb-2">Chotu Collections Assistant</h3>
-            <p className="text-xs text-white/50 mb-4">
-              Ask natural language queries like <span className="text-indigo-300">"What is the balance for Raj Enterprises?"</span> or <span className="text-indigo-300">"Show overdue invoices for Mehta"</span>.
-            </p>
-
-            <div className="flex-1 overflow-y-auto space-y-3 p-3 bg-black/30 border border-white/5 rounded-xl mb-4 text-xs">
-              {chatMessages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
-                >
-                  <div
-                    className={`p-3 rounded-2xl max-w-[85%] whitespace-pre-line ${
-                      msg.sender === 'user'
-                        ? 'bg-indigo-600 text-white rounded-br-none'
-                        : 'bg-white/10 text-white/90 rounded-bl-none'
-                    }`}
-                  >
-                    {msg.text}
-                  </div>
-                  {msg.toolCalled && (
-                    <span className="text-[9px] font-mono text-indigo-400 mt-1">
-                      ⚡ Tool invoked: {msg.toolCalled}
-                    </span>
-                  )}
-                </div>
-              ))}
-              {chatLoading && (
-                <div className="text-white/40 text-xs italic">Chotu is analyzing ledger...</div>
-              )}
-            </div>
-
-            <form onSubmit={handleSendChat} className="flex gap-2">
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Ask about a customer balance or overdue bills..."
-                className="flex-1 p-2.5 bg-black/40 border border-white/10 rounded-xl text-xs text-white placeholder-white/30 focus:outline-none focus:border-indigo-500"
-              />
-              <button
-                type="submit"
-                disabled={chatLoading || !chatInput.trim()}
-                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-medium disabled:opacity-50 cursor-pointer"
-              >
-                Send
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ── Tab 4: Tenant Audit Trail ──────────────────────────────────────── */}
+      {/* ── Tab 3: Tenant Audit Trail ──────────────────────────────────────── */}
       {activeTab === 'audit' && (
         <div className="bg-white/5 border border-white/10 rounded-2xl p-6 space-y-4">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">

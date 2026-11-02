@@ -34,12 +34,46 @@ export const callsApi = {
 
   getRecording: (id: string) =>
     client
-      .get<{ status: 'AVAILABLE' | 'PROCESSING' | 'FAILED'; url?: string }>(`/calls/${id}/recording`)
+      .get<{
+        status: 'AVAILABLE' | 'PROCESSING' | 'FAILED' | 'NONE'
+        url?: string
+        streamUrl?: string
+        downloadUrl?: string
+      }>(`/calls/${id}/recording`)
       .then((r) => r.data),
 
+  uploadRecording: async (id: string, audioBlob: Blob) => {
+    const base64 = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        const result = reader.result as string
+        const base64Data = result.includes(',') ? result.split(',')[1] : result
+        resolve(base64Data)
+      }
+      reader.onerror = reject
+      reader.readAsDataURL(audioBlob)
+    })
+
+    return client
+      .post(`/calls/${id}/recording/upload`, {
+        audioBase64: base64,
+        mimeType: audioBlob.type || 'audio/webm',
+      })
+      .then((r) => r.data)
+  },
+
   downloadRecording: async (id: string, label?: string) => {
-    const data = await callsApi.getRecording(id)
-    if (data.status !== 'AVAILABLE' || !data.url) {
+    let data
+    try {
+      data = await callsApi.getRecording(id)
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        throw new Error('No recording is available for this call.')
+      }
+      throw err
+    }
+
+    if (data.status !== 'AVAILABLE' || (!data.url && !data.downloadUrl)) {
       throw new Error(
         data.status === 'PROCESSING'
           ? 'Recording is still processing. Please try again shortly.'
@@ -48,12 +82,18 @@ export const callsApi = {
             : 'No recording is available for this call.',
       )
     }
-    const ext = data.url.split('?')[0].split('.').pop() || 'ogg'
+    const token = localStorage.getItem('mcf_access_token') || localStorage.getItem('token') || ''
+    // If the endpoint starts with /api/, strip it so client baseURL (/api) does not duplicate to /api/api/
+    let rawEndpoint = data.downloadUrl || `/calls/${id}/recording/download`
+    const downloadEndpoint = rawEndpoint.startsWith('/api/') ? rawEndpoint.replace(/^\/api/, '') : rawEndpoint
+
+    const ext = 'webm'
     const filename = `call-recording-${label ?? id}.${ext}`
+
     try {
-      const audio = await fetch(data.url)
-      if (!audio.ok) throw new Error('download failed')
-      const blob = await audio.blob()
+      const response = await client.get(downloadEndpoint, { responseType: 'blob' })
+      const contentType = typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : 'audio/webm'
+      const blob = new Blob([response.data], { type: contentType })
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -65,8 +105,13 @@ export const callsApi = {
         window.URL.revokeObjectURL(url)
       }, 100)
     } catch {
-      // Cross-origin storage may block blob downloads; fall back to the direct URL.
-      window.open(data.url, '_blank')
+      // Fallback: direct window open with query token auth
+      const apiPrefix = '/api'
+      const endpointPath = downloadEndpoint.startsWith('/') ? downloadEndpoint : `/${downloadEndpoint}`
+      const fullUrl = token
+        ? `${apiPrefix}${endpointPath}?token=${encodeURIComponent(token)}`
+        : `${apiPrefix}${endpointPath}`
+      window.open(fullUrl, '_blank')
     }
   },
 
@@ -80,4 +125,12 @@ export const callsApi = {
     livekitRoom?: string
     recordingEgressId?: string
   }) => client.post<CallSession>('/calls', data).then((r) => r.data),
+
+  initiateOutbound: (data: {
+    customerId: string
+    phone?: string
+    collectionCaseId?: string
+    reason?: string
+  }) => client.post<any>('/calls/outbound/initiate', data).then((r) => r.data),
 }
+

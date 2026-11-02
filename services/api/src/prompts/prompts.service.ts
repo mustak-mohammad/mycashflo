@@ -237,6 +237,28 @@ export class PromptsService {
     return { success: true, message: `Prompt '${existing.name}' deleted` };
   }
 
+  /**
+   * Simulates variable interpolation for a prompt template.
+   */
+  async preview(template: string) {
+    const sampleData = {
+      customerName: 'Raj Enterprises',
+      outstandingAmount: '₹1,45,000',
+      invoiceNumber: 'INV-2026-088',
+      dueDate: '2026-10-25',
+      companyName: 'myCashflo Demo',
+    };
+
+    const preview = this.substituteVariables(template, sampleData);
+    const variables = ['customerName', 'outstandingAmount', 'invoiceNumber', 'dueDate', 'companyName'];
+    const missingVariables = variables.filter((v) => !template.includes(`{{${v}}}`));
+
+    return {
+      preview,
+      missingVariables,
+    };
+  }
+
   private async seedDefaultPrompts(tenantId: string, userId: string) {
     const defaults = [
       {

@@ -1,4 +1,5 @@
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
@@ -45,5 +46,19 @@ export class VoiceController {
   ): Promise<ConversationTurnResult> {
     return this.voiceService.processTurn(user, dto);
   }
+
+  @Get('synthesize')
+  @ApiOperation({ summary: 'Synthesize speech audio for Chotu AI voice prompts & replies' })
+  async synthesizeSpeech(
+    @Query('text') text: string,
+    @Res() res: Response,
+  ) {
+    const audioBuffer = await this.voiceService.synthesizeSpeech(text);
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Length', audioBuffer.length);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.end(audioBuffer);
+  }
 }
+
 

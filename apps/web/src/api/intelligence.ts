@@ -31,7 +31,22 @@ export async function rejectActionProposal(id: string, reason?: string): Promise
   return res.data
 }
 
-export async function sendIntelligenceChat(message: string, customerId?: string): Promise<{ reply: string; toolCalled: string | null; data: any }> {
-  const res = await client.post<{ reply: string; toolCalled: string | null; data: any }>('/intelligence/chat', { message, customerId })
+export async function sendIntelligenceChat(
+  message: string,
+  customerId?: string,
+): Promise<{
+  reply: string
+  toolCalled: string | null
+  actionProposal?: any
+  requiresConfirmation?: boolean
+  data: any
+}> {
+  const res = await client.post<{
+    reply: string
+    toolCalled: string | null
+    actionProposal?: any
+    requiresConfirmation?: boolean
+    data: any
+  }>('/intelligence/chat', { message, customerId })
   return res.data
 }

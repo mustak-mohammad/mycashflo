@@ -5,6 +5,13 @@ import { FollowUpsService } from '../follow-ups/follow-ups.service.js';
 import { CallsService } from '../calls/calls.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { PaymentsService } from '../payments/payments.service.js';
+import { IntegrationsService } from '../integrations/integrations.service.js';
+import { UsersService } from '../users/users.service.js';
+import { RazorpayAdapter } from '../integrations/adapters/razorpay.adapter.js';
+import { StripeAdapter } from '../integrations/adapters/stripe.adapter.js';
+import { WhatsAppCloudAdapter } from '../integrations/adapters/whatsapp-cloud.adapter.js';
+import { SipTelephonyAdapter } from '../integrations/adapters/sip-telephony.adapter.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { NotFoundException } from '@nestjs/common';
@@ -17,6 +24,9 @@ describe('Multi-Tenant Isolation Verification', () => {
   let callsService: CallsService;
   let auditLogsService: AuditLogsService;
   let notificationsService: NotificationsService;
+  let paymentsService: PaymentsService;
+  let integrationsService: IntegrationsService;
+  let usersService: UsersService;
 
   const tenantAUser: AuthUser = {
     userId: 'user_tenant_a',
@@ -66,14 +76,45 @@ describe('Multi-Tenant Isolation Verification', () => {
       tenant: {
         findUnique: vi.fn(),
       },
+      integrationConfig: {
+        findMany: vi.fn(),
+        findUnique: vi.fn(),
+        upsert: vi.fn(),
+      },
+      payment: {
+        findMany: vi.fn(),
+        count: vi.fn(),
+        create: vi.fn(),
+      },
+      user: {
+        findMany: vi.fn(),
+        count: vi.fn(),
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
     };
+
+    const razorpay = new RazorpayAdapter();
+    const stripe = new StripeAdapter();
+    const whatsapp = new WhatsAppCloudAdapter();
+    const telephony = new SipTelephonyAdapter();
 
     customersService = new CustomersService(mockPrisma as PrismaService);
     invoicesService = new InvoicesService(mockPrisma as PrismaService);
     followUpsService = new FollowUpsService(mockPrisma as PrismaService);
     callsService = new CallsService(mockPrisma as PrismaService);
     auditLogsService = new AuditLogsService(mockPrisma as PrismaService);
-    notificationsService = new NotificationsService(mockPrisma as PrismaService, auditLogsService);
+    usersService = new UsersService(mockPrisma as PrismaService, auditLogsService);
+    integrationsService = new IntegrationsService(
+      mockPrisma as PrismaService,
+      auditLogsService,
+      razorpay,
+      stripe,
+      whatsapp,
+      telephony,
+    );
+    notificationsService = new NotificationsService(mockPrisma as PrismaService, auditLogsService, integrationsService);
+    paymentsService = new PaymentsService(mockPrisma as PrismaService, auditLogsService, integrationsService);
   });
 
   describe('Customer Isolation', () => {
@@ -201,6 +242,81 @@ describe('Multi-Tenant Isolation Verification', () => {
       await expect(
         notificationsService.findOne('notif_of_tenant_b', tenantAUser),
       ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('Integration Configuration Isolation', () => {
+    it('scopes integration config queries strictly to callers tenantId', async () => {
+      mockPrisma.integrationConfig.findMany.mockResolvedValue([]);
+
+      await integrationsService.getConfigs(tenantAUser);
+      expect(mockPrisma.integrationConfig.findMany).toHaveBeenCalledWith({
+        where: { tenantId: 'tenant_a_id' },
+        orderBy: { provider: 'asc' },
+      });
+
+      await integrationsService.getConfigs(tenantBUser);
+      expect(mockPrisma.integrationConfig.findMany).toHaveBeenCalledWith({
+        where: { tenantId: 'tenant_b_id' },
+        orderBy: { provider: 'asc' },
+      });
+    });
+  });
+
+  describe('Payment Link Isolation', () => {
+    it('rejects generating payment links for invoices belonging to another tenant', async () => {
+      // Invoice not found in tenant_a
+      mockPrisma.invoice.findFirst.mockResolvedValue(null);
+
+      await expect(
+        paymentsService.createPaymentLink(tenantAUser, {
+          invoiceId: 'inv_belonging_to_tenant_b',
+        }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockPrisma.invoice.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'inv_belonging_to_tenant_b', tenantId: 'tenant_a_id' },
+        }),
+      );
+    });
+  });
+
+  describe('User & Team Isolation', () => {
+    it('scopes user listing strictly to callers tenantId', async () => {
+      mockPrisma.user.findMany.mockResolvedValue([]);
+
+      await usersService.findAll(tenantAUser);
+      expect(mockPrisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tenantId: 'tenant_a_id' },
+        }),
+      );
+
+      await usersService.findAll(tenantBUser);
+      expect(mockPrisma.user.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { tenantId: 'tenant_b_id' },
+        }),
+      );
+    });
+
+    it('rejects retrieving or modifying a user belonging to another tenant', async () => {
+      mockPrisma.user.findFirst.mockResolvedValue(null);
+
+      await expect(
+        usersService.findOne('user_of_tenant_b', tenantAUser),
+      ).rejects.toThrow(NotFoundException);
+
+      await expect(
+        usersService.update('user_of_tenant_b', tenantAUser, { name: 'Tampered Name' }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockPrisma.user.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'user_of_tenant_b', tenantId: 'tenant_a_id' },
+        }),
+      );
     });
   });
 });

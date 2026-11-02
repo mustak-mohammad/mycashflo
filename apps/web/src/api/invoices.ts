@@ -20,6 +20,15 @@ export const invoicesApi = {
   getOne: (id: string) =>
     apiClient.get<Invoice>(`/invoices/${id}`).then((r) => r.data),
 
+  create: (data: {
+    number: string
+    customerId: string
+    amount: number
+    issueDate: string
+    dueDate: string
+    description?: string
+  }) => apiClient.post<Invoice>('/invoices', data).then((r) => r.data),
+
   downloadCsv: async (params?: { status?: string; customerId?: string }) => {
     const response = await apiClient.get('/invoices/export', { params, responseType: 'blob' })
     triggerCsvDownload(response.data, `invoices-${new Date().toISOString().slice(0, 10)}.csv`)

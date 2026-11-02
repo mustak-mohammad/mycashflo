@@ -14,6 +14,8 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
+import { RolesGuard } from '../auth/roles.guard.js';
+import { Roles } from '../auth/roles.decorator.js';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import type { Response } from 'express';
@@ -23,10 +25,11 @@ import {
   CreatePromptDto,
   UpdatePromptDto,
 } from './prompts.service.js';
+import { UserRole } from '@prisma/client';
 
 @ApiTags('Voice Prompts')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('prompts')
 export class PromptsController {
   constructor(private readonly promptsService: PromptsService) {}
@@ -76,14 +79,16 @@ export class PromptsController {
   }
 
   @Post()
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Create a new voice prompt' })
+  @ApiOperation({ summary: 'Create a new voice prompt (Admin/Manager only)' })
   async create(@CurrentUser() user: AuthUser, @Body() dto: CreatePromptDto) {
     return this.promptsService.create(user, dto);
   }
 
   @Patch(':id')
-  @ApiOperation({ summary: 'Update an existing voice prompt' })
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Update an existing voice prompt (Admin/Manager only)' })
   async update(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
@@ -93,9 +98,17 @@ export class PromptsController {
   }
 
   @Delete(':id')
-  @ApiOperation({ summary: 'Delete a voice prompt' })
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Delete a voice prompt (Admin/Manager only)' })
   async remove(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.promptsService.remove(id, user);
+  }
+
+  @Post('preview')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Preview a prompt template with sample data' })
+  async preview(@Body() dto: { template: string }) {
+    return this.promptsService.preview(dto.template);
   }
 }
 

@@ -23,6 +23,13 @@ describe('IntelligenceService', () => {
       customer: {
         findFirst: vi.fn(),
         findMany: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn(),
+      },
+      integrationConfig: {
+        findFirst: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn(),
       },
       invoice: {
         findFirst: vi.fn(),
@@ -242,6 +249,239 @@ describe('IntelligenceService', () => {
       expect(mockAuditLogs.log).toHaveBeenCalledWith(
         expect.objectContaining({ action: 'ai.action_rejected' }),
       );
+    });
+  });
+
+  describe('Cease-Contact (NO_CONTACT) & Contact Preferences', () => {
+    it('records cease-contact preference and updates customer notes with [DND:NO_CONTACT]', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_1',
+        tenantId: 'tenant_1',
+        name: 'Sharma Logistics',
+        notes: 'Preferred contact by phone',
+      });
+      mockPrisma.customer.update.mockImplementation(async ({ data }) => ({
+        id: 'cust_1',
+        tenantId: 'tenant_1',
+        name: 'Sharma Logistics',
+        notes: data.notes,
+      }));
+
+      const response = await service.executeTool(mockUser, {
+        toolName: 'record_cease_contact',
+        parameters: {
+          customerId: 'cust_1',
+          reason: 'Customer explicitly requested to stop calling',
+          channel: 'ALL',
+        },
+      });
+
+      expect(response.status).toBe('SUCCESS');
+      expect(response.result.dndActive).toBe(true);
+      expect(response.result.contactPreference).toBe('NO_CONTACT');
+      expect(mockPrisma.customer.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'cust_1' },
+          data: expect.objectContaining({
+            notes: expect.stringContaining('[DND:NO_CONTACT: Customer explicitly requested to stop calling'),
+          }),
+        }),
+      );
+      expect(mockAuditLogs.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'customer.cease_contact_recorded' }),
+      );
+    });
+
+    it('enforces tenant isolation and throws NotFoundException when customer belongs to another tenant', async () => {
+      // Customer does not exist in mockUser.tenantId
+      mockPrisma.customer.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'record_cease_contact',
+          parameters: {
+            customerId: 'cust_cross_tenant',
+            reason: 'Stop calling',
+          },
+        }),
+      ).rejects.toThrow('Customer not found in tenant');
+      expect(mockPrisma.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('suppresses automated outreach reminders when customer has active [DND:NO_CONTACT] preference', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_1',
+        tenantId: 'tenant_1',
+        name: 'Sharma Logistics',
+        notes: '[DND:NO_CONTACT - Recorded on 2026-10-19]\nPrevious notes',
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'dispatch_reminder',
+          parameters: {
+            customerId: 'cust_1',
+            channel: 'WHATSAPP',
+            template: 'PAYMENT_REMINDER_OVERDUE',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow('Outreach suppressed: Customer has an active Do-Not-Contact (cease-contact) preference');
+
+      expect(mockNotifications.dispatch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Consequential Customer Creation (create_customer)', () => {
+    it('creates an ActionProposal and blocks execution when confirmed is false', async () => {
+      mockPrisma.actionProposal.create.mockResolvedValue({
+        id: 'prop_cust_1',
+        toolName: 'create_customer',
+        parameters: { name: 'Acme Traders', phone: '+91 99887 76655', email: 'acme@traders.in' },
+        summary: 'Add new customer "Acme Traders" (Phone: +91 99887 76655, Email: acme@traders.in, Company: N/A)',
+        riskLevel: ActionRisk.MEDIUM,
+        status: ProposalStatus.PENDING,
+      });
+
+      const response = await service.executeTool(mockUser, {
+        toolName: 'create_customer',
+        parameters: { name: 'Acme Traders', phone: '+91 99887 76655', email: 'acme@traders.in' },
+        confirmed: false,
+      });
+
+      expect(response.status).toBe('REQUIRES_CONFIRMATION');
+      expect(response.proposal).toBeDefined();
+      expect(mockPrisma.actionProposal.create).toHaveBeenCalled();
+      expect(mockPrisma.customer.create).not.toHaveBeenCalled();
+      expect(mockAuditLogs.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ai.action_proposed' }),
+      );
+    });
+
+    it('creates customer in tenant and audit logs when confirmed is true', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(null); // No duplicate
+      mockPrisma.customer.create.mockResolvedValue({
+        id: 'cust_new_1',
+        name: 'Acme Traders',
+        phone: '+91 99887 76655',
+        email: 'acme@traders.in',
+        tenantId: mockUser.tenantId,
+        outstandingBalance: 0,
+        status: 'ACTIVE',
+      });
+
+      const response = await service.executeTool(mockUser, {
+        toolName: 'create_customer',
+        parameters: { name: 'Acme Traders', phone: '+91 99887 76655', email: 'acme@traders.in' },
+        confirmed: true,
+      });
+
+      expect(response.status).toBe('SUCCESS');
+      expect(response.result.customer.id).toBe('cust_new_1');
+      expect(mockPrisma.customer.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            name: 'Acme Traders',
+            phone: '+91 99887 76655',
+            email: 'acme@traders.in',
+            tenantId: mockUser.tenantId,
+          }),
+        }),
+      );
+      expect(mockAuditLogs.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ai.customer_created' }),
+      );
+    });
+
+    it('rejects creation when duplicate phone or email exists within tenant', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_existing',
+        phone: '+91 99887 76655',
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'create_customer',
+          parameters: { name: 'Acme Traders', phone: '+91 99887 76655' },
+          confirmed: true,
+        }),
+      ).rejects.toThrow(/already exists in this tenant/);
+      expect(mockPrisma.customer.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Dashboard Customization & Preferences (customize_dashboard)', () => {
+    it('updates tenant dashboard preferences without modifying financial records', async () => {
+      mockPrisma.integrationConfig.findFirst.mockResolvedValue(null);
+      mockPrisma.integrationConfig.create.mockResolvedValue({
+        id: 'config_1',
+        tenantId: mockUser.tenantId,
+        provider: 'DASHBOARD_PREFERENCES',
+        config: {
+          hiddenWidgets: ['recent_payments'],
+          dateRange: '30d',
+          agingThreshold: 45,
+        },
+      });
+
+      const response = await service.executeTool(mockUser, {
+        toolName: 'customize_dashboard',
+        parameters: {
+          hiddenWidgets: ['recent_payments'],
+          dateRange: '30d',
+          agingThreshold: 45,
+        },
+        confirmed: false, // Non-consequential, runs immediately
+      });
+
+      expect(response.status).toBe('SUCCESS');
+      expect(response.result.preferences.dateRange).toBe('30d');
+      expect(response.result.preferences.agingThreshold).toBe(45);
+      expect(response.result.preferences.hiddenWidgets).toContain('recent_payments');
+      // Verify NO financial entities are written
+      expect(mockPrisma.customer.create).not.toHaveBeenCalled();
+      expect(mockPrisma.customer.update).not.toHaveBeenCalled();
+      expect(mockAuditLogs.log).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'ai.dashboard_customized' }),
+      );
+    });
+  });
+
+  describe('Natural Language Chat Intent Routing', () => {
+    it('creates an action proposal preview when user asks to add a customer', async () => {
+      mockPrisma.actionProposal.create.mockResolvedValue({
+        id: 'prop_chat_1',
+        toolName: 'create_customer',
+        parameters: { name: 'Pooja Textiles', phone: '+919876500000', email: 'pooja@textiles.in' },
+        summary: 'Add new customer "Pooja Textiles"',
+        riskLevel: ActionRisk.MEDIUM,
+        status: ProposalStatus.PENDING,
+      });
+
+      const response = await service.chat(mockUser, {
+        message: 'Add customer Pooja Textiles with phone +919876500000 and email pooja@textiles.in',
+      });
+
+      expect(response.toolCalled).toBe('create_customer');
+      expect(response.requiresConfirmation).toBe(true);
+      expect(response.actionProposal).toBeDefined();
+      expect(response.reply).toContain('Pooja Textiles');
+    });
+
+    it('customizes dashboard view when user asks to filter dashboard without modifying financial records', async () => {
+      mockPrisma.integrationConfig.findFirst.mockResolvedValue(null);
+      mockPrisma.integrationConfig.create.mockResolvedValue({
+        id: 'config_chat_1',
+        config: { dateRange: '30d', agingThreshold: 30 },
+      });
+
+      const response = await service.chat(mockUser, {
+        message: 'Filter dashboard for 30 days',
+      });
+
+      expect(response.toolCalled).toBe('customize_dashboard');
+      expect(response.reply).toContain('Updated dashboard preferences');
+      expect(mockPrisma.customer.create).not.toHaveBeenCalled();
     });
   });
 });

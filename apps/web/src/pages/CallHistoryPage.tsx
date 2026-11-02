@@ -5,11 +5,14 @@ import { callsApi } from '../api/calls'
 import type { CallSession } from '../types'
 
 const OUTCOME_STYLE: Record<string, { bg: string; color: string; label: string }> = {
-  PROMISE_TO_PAY:      { bg: 'rgba(245,158,11,0.12)', color: 'var(--warning)',    label: 'Promise to Pay' },
-  NO_CONTACT:          { bg: 'rgba(148,163,184,0.12)', color: 'var(--text-muted)', label: 'No Contact' },
-  RESOLVED:            { bg: 'rgba(16,185,129,0.12)',  color: 'var(--accent)',     label: 'Resolved' },
-  DISPUTE:             { bg: 'rgba(239,68,68,0.12)',   color: 'var(--danger)',     label: 'Dispute' },
-  CALLBACK_REQUESTED:  { bg: 'rgba(99,102,241,0.15)',  color: 'var(--primary)',    label: 'Callback' },
+  PROMISE_TO_PAY:      { bg: 'rgba(245,158,11,0.15)', color: 'var(--warning)',    label: 'Promise to Pay' },
+  WILL_PAY_LATER:      { bg: 'rgba(59,130,246,0.15)',  color: '#3b82f6',           label: 'Will Pay Later' },
+  UNABLE_TO_PAY:       { bg: 'rgba(239,68,68,0.15)',   color: 'var(--danger)',     label: 'Unable to Pay' },
+  PAYMENT_CLAIMED:     { bg: 'rgba(16,185,129,0.15)',  color: 'var(--accent)',     label: 'Payment Claimed' },
+  CALLBACK_REQUESTED:  { bg: 'rgba(99,102,241,0.15)',  color: 'var(--primary)',    label: 'Callback Requested' },
+  DISPUTE:             { bg: 'rgba(244,63,94,0.15)',   color: '#f43f5e',           label: 'Dispute' },
+  NO_CONTACT:          { bg: 'rgba(148,163,184,0.15)', color: 'var(--text-muted)', label: 'No Contact' },
+  RESOLVED:            { bg: 'rgba(16,185,129,0.15)',  color: 'var(--accent)',     label: 'Resolved' },
   OTHER:               { bg: 'rgba(148,163,184,0.12)', color: 'var(--text-muted)', label: 'Other' },
 }
 
@@ -47,6 +50,8 @@ export default function CallHistoryPage() {
   const [page, setPage] = useState(1)
   const [exporting, setExporting] = useState(false)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [playingId, setPlayingId] = useState<string | null>(null)
+  const token = localStorage.getItem('mcf_access_token') || localStorage.getItem('token') || ''
   const limit = 20
 
   const fetcher = useCallback(
@@ -118,8 +123,12 @@ export default function CallHistoryPage() {
         {[
           { label: 'All Outcomes', value: '' },
           { label: 'Promise to Pay', value: 'PROMISE_TO_PAY' },
-          { label: 'Resolved', value: 'RESOLVED' },
+          { label: 'Will Pay Later', value: 'WILL_PAY_LATER' },
+          { label: 'Unable to Pay', value: 'UNABLE_TO_PAY' },
+          { label: 'Payment Claimed', value: 'PAYMENT_CLAIMED' },
+          { label: 'Callback', value: 'CALLBACK_REQUESTED' },
           { label: 'Dispute', value: 'DISPUTE' },
+          { label: 'Resolved', value: 'RESOLVED' },
           { label: 'No Contact', value: 'NO_CONTACT' },
         ].map((tab) => (
           <button
@@ -194,25 +203,75 @@ export default function CallHistoryPage() {
                         {c.agent?.name ?? 'Chotu AI'}
                       </td>
                       <td className="px-5 py-3.5">
-                        {c.recordingStatus ? (
-                          <button
-                            onClick={() => handleRecordingDownload(c)}
-                            disabled={downloadingId === c.id}
-                            title="Download call recording"
-                            className="px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1"
-                            style={{
-                              background: 'rgba(99,102,241,0.15)',
-                              color: 'var(--primary)',
-                              border: '1px solid var(--border)',
-                              cursor: downloadingId === c.id ? 'wait' : 'pointer',
-                            }}
+                        {c.recordingStatus === 'AVAILABLE' ? (
+                          <div className="flex flex-col gap-1.5 min-w-[140px]">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                onClick={() => setPlayingId(playingId === c.id ? null : c.id)}
+                                className="px-2.5 py-1 rounded-md text-xs font-semibold flex items-center gap-1 transition-colors"
+                                style={{
+                                  background: playingId === c.id ? 'var(--primary)' : 'rgba(99,102,241,0.15)',
+                                  color: playingId === c.id ? '#ffffff' : 'var(--primary)',
+                                  border: '1px solid var(--border)',
+                                }}
+                                title={playingId === c.id ? 'Close player' : 'Play call audio'}
+                              >
+                                <span>{playingId === c.id ? '⏹️' : '▶️'}</span>
+                                {playingId === c.id ? 'Close' : 'Play'}
+                              </button>
+
+                              <button
+                                onClick={() => handleRecordingDownload(c)}
+                                disabled={downloadingId === c.id}
+                                title="Download call recording"
+                                className="px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1 transition-colors"
+                                style={{
+                                  background: 'rgba(255,255,255,0.06)',
+                                  color: 'var(--text)',
+                                  border: '1px solid var(--border)',
+                                  cursor: downloadingId === c.id ? 'wait' : 'pointer',
+                                }}
+                              >
+                                <span>📥</span>
+                                {downloadingId === c.id ? '…' : 'Audio'}
+                              </button>
+                            </div>
+
+                            {playingId === c.id && (
+                              <div className="mt-1.5 p-1 rounded bg-black/40 border border-slate-700/60 shadow-lg">
+                                <audio
+                                  controls
+                                  autoPlay
+                                  className="h-8 w-48 rounded"
+                                  src={`/api/calls/${c.id}/recording/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`}
+                                >
+                                  Your browser does not support audio playback.
+                                </audio>
+                              </div>
+                            )}
+                          </div>
+                        ) : c.recordingStatus === 'PROCESSING' ? (
+                          <span
+                            className="px-2 py-0.5 rounded text-[11px] font-medium inline-flex items-center gap-1"
+                            style={{ background: 'rgba(234,179,8,0.12)', color: '#ca8a04', border: '1px solid rgba(234,179,8,0.2)' }}
                           >
-                            <span>🎙️</span>
-                            {downloadingId === c.id ? 'Preparing…' : 'Audio'}
-                          </button>
+                            <span>⏳</span> Processing
+                          </span>
+                        ) : c.recordingStatus === 'FAILED' ? (
+                          <span
+                            className="px-2 py-0.5 rounded text-[11px] font-medium inline-flex items-center gap-1"
+                            style={{ background: 'rgba(239,68,68,0.12)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}
+                            title="Audio recording failed during processing or upload"
+                          >
+                            <span>❌</span> Failed
+                          </span>
                         ) : (
-                          <span className="text-[10px] uppercase tracking-wider font-semibold opacity-30" style={{ color: 'var(--text-muted)' }}>
-                            No Audio
+                          <span
+                            className="px-2 py-0.5 rounded text-[11px] font-normal inline-block"
+                            style={{ background: 'rgba(255,255,255,0.04)', color: 'var(--text-muted)', border: '1px solid var(--border)' }}
+                            title="Audio was not recorded for this historical session"
+                          >
+                            Recording unavailable
                           </span>
                         )}
                       </td>

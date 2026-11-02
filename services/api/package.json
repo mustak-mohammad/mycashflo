@@ -20,7 +20,8 @@
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
-    "db:seed": "npx ts-node --esm prisma/seed.ts"
+    "db:seed": "npx ts-node --esm prisma/seed.ts",
+    "super-admin:bootstrap": "node scripts/bootstrap-super-admin.mjs"
   },
   "prisma": {
     "seed": "ts-node --esm prisma/seed.ts"

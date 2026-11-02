@@ -17,5 +17,14 @@ export const voiceApi = {
 
   stopRecording: (data: { egressId: string; callSessionId?: string }) =>
     client.post<{ egressId: string; status: string }>('/voice/recording/stop', data).then((r) => r.data),
+
+  synthesize: (text: string) =>
+    client
+      .get('/voice/synthesize', {
+        params: { text },
+        responseType: 'arraybuffer',
+      })
+      .then((r) => r.data as ArrayBuffer),
 }
+
 
