@@ -543,13 +543,67 @@ export class PlatformService {
       dbStatus = 'degraded';
     }
 
+    const isPlaceholder = (v?: string) =>
+      !v || v.startsWith('your_') || v.includes('placeholder') || v.trim() === '';
+
+    const livekitConfigured = Boolean(
+      process.env.LIVEKIT_API_KEY &&
+        !isPlaceholder(process.env.LIVEKIT_API_KEY) &&
+        process.env.LIVEKIT_API_SECRET &&
+        !isPlaceholder(process.env.LIVEKIT_API_SECRET),
+    );
+
+    const sipOutboundTrunk = process.env.SIP_OUTBOUND_TRUNK_ID;
+    const sipCallerId = process.env.SIP_OUTBOUND_CALLER_ID;
+    const sipConfigured = Boolean(sipOutboundTrunk && !isPlaceholder(sipOutboundTrunk));
+
     const providers = {
       database: { status: dbStatus, engine: 'PostgreSQL (Prisma)' },
-      razorpay: { configured: Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) },
-      stripe: { configured: Boolean(process.env.STRIPE_SECRET_KEY) },
-      resend: { configured: Boolean(process.env.RESEND_API_KEY) },
-      whatsapp: { configured: Boolean(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID) },
-      livekit: { configured: Boolean(process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) },
+      razorpay: {
+        configured: Boolean(
+          process.env.RAZORPAY_KEY_ID &&
+            !isPlaceholder(process.env.RAZORPAY_KEY_ID) &&
+            process.env.RAZORPAY_KEY_SECRET &&
+            !isPlaceholder(process.env.RAZORPAY_KEY_SECRET),
+        ),
+      },
+      stripe: {
+        configured: Boolean(
+          process.env.STRIPE_SECRET_KEY && !isPlaceholder(process.env.STRIPE_SECRET_KEY),
+        ),
+      },
+      resend: {
+        configured: Boolean(
+          process.env.RESEND_API_KEY && !isPlaceholder(process.env.RESEND_API_KEY),
+        ),
+      },
+      whatsapp: {
+        configured: Boolean(
+          process.env.WHATSAPP_TOKEN &&
+            !isPlaceholder(process.env.WHATSAPP_TOKEN) &&
+            process.env.WHATSAPP_PHONE_NUMBER_ID &&
+            !isPlaceholder(process.env.WHATSAPP_PHONE_NUMBER_ID),
+        ),
+      },
+      livekit: {
+        configured: livekitConfigured,
+        agentName: process.env.LIVEKIT_AGENT_NAME || 'chotu-voice-agent',
+        webhookConfigured: Boolean(
+          process.env.LIVEKIT_WEBHOOK_SECRET && !isPlaceholder(process.env.LIVEKIT_WEBHOOK_SECRET),
+        ),
+        egressConfigured: Boolean(
+          process.env.LIVEKIT_EGRESS_S3_BUCKET || process.env.LIVEKIT_EGRESS_PATH,
+        ),
+      },
+      sipTelephony: {
+        configured: sipConfigured,
+        outboundTrunkConfigured: sipConfigured,
+        inboundTrunkConfigured: Boolean(
+          process.env.SIP_INBOUND_TRUNK_ID && !isPlaceholder(process.env.SIP_INBOUND_TRUNK_ID),
+        ),
+        callerIdConfigured: Boolean(sipCallerId && sipCallerId.startsWith('+')),
+        policy: outboundCalls ? 'LIVE_DISPATCH_ENABLED' : 'OUTBOUND_CALLS_DISABLED_BY_POLICY',
+      },
     };
 
     await this.auditLogs.log({

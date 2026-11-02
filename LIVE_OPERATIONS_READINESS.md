@@ -160,7 +160,128 @@ npm --prefix services/api test
 
 ---
 
-## 6. Outbound Calls & Reminders Readiness
+## 6. LiveKit Cloud Voice & SIP Telephony Integration
+
+### Architecture Overview
+
+myCashFlo implements a secure, modular voice calling architecture orchestrating LiveKit Cloud for real-time WebRTC audio sessions and an enterprise SIP trunk for carrier PSTN calling:
+
+```mermaid
+flowchart LR
+    subgraph Browser ["Web & Mobile Frontend"]
+        UI["React Web (VoicePage) / Flutter"]
+    end
+
+    subgraph Backend ["NestJS Backend Services"]
+        VS["VoiceService (/api/voice)"]
+        CS["CallsService (/api/calls)"]
+        ST["SipTelephonyAdapter"]
+        WH["LiveKit Webhook Receiver"]
+    end
+
+    subgraph LiveKit ["LiveKit Cloud Platform"]
+        LKC["LiveKit Cloud SFU"]
+        LK_SIP["LiveKit SIP Ingress / Egress"]
+        LK_EGR["LiveKit Audio Egress (S3)"]
+    end
+
+    subgraph ChotuAI ["Voice Agent Service"]
+        AG["Chotu AI Worker (agent.py)"]
+        SM["10-Stage Conversation Engine"]
+    end
+
+    subgraph Carrier ["PSTN Carrier Trunk"]
+        SIP["SIP Trunk (Twilio / Tata / Airtel)"]
+        PSTN["Debtor Mobile / Telephone"]
+    end
+
+    UI -->|"1. POST /api/voice/token (Room Token)"| VS
+    UI <-->|"WebRTC Media Channel"| LKC
+    CS -->|"Outbound Request (Gated)"| ST
+    ST -->|"LiveKit SIP Outbound Dispatch"| LK_SIP
+    LK_SIP -->|"Encrypted SIP / SRTP"| SIP
+    SIP -->|"PSTN Call"| PSTN
+    LKC <-->|"Agent Audio Track"| AG
+    AG -->|"Intent & Context"| SM
+    LKC -->|"Room/Egress Events"| WH
+    WH -->|"Update CallSession"| CS
+    LK_EGR -->|"Recording Storage"| CS
+```
+
+### Key Security & Operational Principles
+
+1. **Short-Lived, Scoped Access Tokens:** All WebRTC access tokens are signed server-side using `livekit-server-sdk` with strict validity (`ttlSeconds` constrained between 60s and 3600s, default 900s). Tokens grant explicit permissions according to role:
+   - `AGENT`: `canPublish: true`, `canSubscribe: true`, `canPublishData: true`
+   - `CUSTOMER`: `canPublish: true`, `canSubscribe: true`, `canPublishData: false`
+   - `OBSERVER`: `canPublish: false`, `canSubscribe: true`, `hidden: true`
+2. **Strict Webhook Authentication:** The LiveKit webhook endpoint (`POST /api/voice/webhook/livekit`) requires a valid Authorization header signed with `LIVEKIT_WEBHOOK_SECRET` or `LIVEKIT_API_SECRET`. Simulation signatures (`mock_valid_signature`) are rejected with `UnauthorizedException` in production environments.
+3. **Webhook Idempotency:** An in-memory LRU event registry tracks processed LiveKit event IDs (`eventId`), silently dropping replayed or duplicate webhook deliveries.
+4. **Outbound Calling Policy Guard:** Outbound PSTN calling is strictly controlled by `ENABLE_OUTBOUND_CALLS=false`. If outbound calling is invoked while the flag is false, `SipTelephonyAdapter` immediately intercepts the request and returns a simulated session (`status: 'SIMULATED'`, `isSimulated: true`), logging:
+   `"[SAFETY GUARD] Real outbound call suppressed. OUTBOUND_CALLS_ENABLED is false. Simulating SIP session."`
+5. **Carrier Status Synchronization:** Inbound carrier callbacks (`POST /api/telephony/webhook/:provider`) update `CallSession` metadata (`carrierStatus`, `busyAt`, `failedAt`, `lastCallbackAt`), mapping carrier events (`busy`, `no-answer`, `failed`, `completed`) idempotently and updating timestamps.
+
+---
+
+## 7. Step-by-Step LiveKit Cloud & SIP Setup Guide
+
+### Part A: LiveKit Cloud Setup
+
+1. **Create Project:** Sign in to [LiveKit Cloud](https://cloud.livekit.io/) and create a project (e.g., `mycashflo-production`).
+2. **Generate API Credentials:**
+   - In **Settings $\to$ Keys**, generate an API Key and API Secret.
+   - Note the project WebSocket URL (e.g., `wss://<your-project>.livekit.cloud`).
+3. **Configure Webhook:**
+   - In **Settings $\to$ Webhooks**, add your public endpoint:
+     `https://api.yourdomain.com/api/voice/webhook/livekit`
+   - Copy the generated Webhook Secret into `LIVEKIT_WEBHOOK_SECRET`.
+   - Subscribe to events: `room_started`, `room_finished`, `participant_joined`, `participant_left`, `egress_started`, `egress_ended`.
+4. **Configure Cloud Audio Egress (Recordings):**
+   - In **Settings $\to$ Egress**, configure an S3-compatible bucket (e.g., AWS S3, Cloudflare R2, MinIO).
+   - Enter `LIVEKIT_EGRESS_S3_BUCKET` and set `LIVEKIT_EGRESS_PATH=recordings/`.
+
+### Part B: SIP Trunk / Carrier Setup
+
+1. **Procure SIP Trunk:** Obtain an enterprise SIP trunk from a certified telecom carrier (Twilio Elastic SIP Trunking, Tata Communications, Airtel, or Telnyx).
+2. **Register Outbound Trunk in LiveKit:**
+   - Using `livekit-cli` or LiveKit Cloud Console $\to$ **SIP Trunks**:
+     ```bash
+     lk sip outbound create --name "mycashflo-outbound" \
+       --address "sip.carrier.com" \
+       --transport tls \
+       --numbers "+91XXXXXXXXXX" \
+       --username "<carrier_username>" \
+       --password "<carrier_password>"
+     ```
+   - Store the generated Trunk ID in `SIP_OUTBOUND_TRUNK_ID` (format: `ST_...`).
+3. **Register Inbound Trunk & Dispatch Rule (Optional for Inbound Callbacks):**
+   - Create an inbound SIP trunk matching incoming DID numbers.
+   - Configure a Dispatch Rule to route incoming calls directly to Chotu AI rooms.
+4. **Set Verified Outbound Caller ID:**
+   - Configure `SIP_OUTBOUND_CALLER_ID` with an E.164 formatted number (e.g., `+919876543210`). The number must match the registered telecom sender CLI under Indian TRAI regulations.
+
+### Part C: Chotu AI Agent Worker Setup
+
+1. **Worker Installation:**
+   - Ensure Python 3.10+ is installed in `services/voice-agent`.
+   - Install dependencies or run with standard library fallback:
+     ```bash
+     cd services/voice-agent
+     python agent.py --livekit --room <room_name>
+     ```
+2. **Pre-Call Consent & Safety Verification:**
+   - The worker automatically invokes `check_pre_call_consent()` before joining any room or accepting audio streams.
+   - If `DND:NO_CONTACT` or `preferredChannel == 'NO_CONTACT'` is present, the call is aborted immediately.
+3. **Real-Time Dialogue Handling:**
+   - Chotu AI processes speech turns through a 10-stage state machine preserving:
+     - Hardship / cannot pay $\to$ empathic rescheduling / agent handoff proposal.
+     - Refusal to pay $\to$ formal acknowledgment & dispute registration.
+     - Already paid $\to$ UTR collection & immediate verification proposal.
+     - Invoice dispute $\to$ reason capture, dispute filing, and pause on collections.
+     - Promise to pay (PTP) $\to$ recorded **only** with explicit debtor agreement and date/amount confirmation.
+
+---
+
+## 8. Outbound Calls & Reminders Readiness
 
 ### Current Configuration State
 - `ENABLE_OUTBOUND_CALLS`: `false` (Confirmed via runtime environment check)
@@ -190,12 +311,12 @@ When external providers are unconfigured:
 
 ---
 
-## 7. Customer Consent & Safety Guards
+## 9. Customer Consent & Safety Guards
 
 ### `DND:NO_CONTACT` Enforcement
 Customer opt-out preferences and cease-contact requests are enforced across all outreach channels:
 
-- **Voice Calls:** `CallsService.initiateCall` checks `customer.notes` for `DND:NO_CONTACT` and `customer.preferredChannel === 'NO_CONTACT'`. If present, the call is blocked immediately with an audit log.
+- **Voice Calls:** `CallsService.initiateCall` and `LiveKitChotuWorker.check_pre_call_consent()` check `customer.notes` for `DND:NO_CONTACT` and `customer.preferredChannel === 'NO_CONTACT'`. If present, the call is blocked immediately with an audit log.
 - **Automated Reminders:** `CollectionsOrchestrator` and `NotificationsService` filter out any invoice where the customer record contains `DND:NO_CONTACT`, logging:
   `"Customer has active DND:NO_CONTACT preference. Outreach suppressed."`
 - **Real-Time Call AI Agent:** If a debtor during a call states *"Stop calling me"* or *"Do not call this number again"*, the Chotu voice agent tags the conversation with outcome `NO_CONTACT` and appends `[DND:NO_CONTACT - Requested on <timestamp>]` directly to the customer's permanent notes.
@@ -203,7 +324,7 @@ Customer opt-out preferences and cease-contact requests are enforced across all 
 
 ---
 
-## 8. Data Preservation Confirmation
+## 10. Data Preservation Confirmation
 
 All existing production and test fixtures in the local database were strictly preserved throughout this task:
 
@@ -218,20 +339,22 @@ No database migrations, drops, resets, or reseed operations were performed.
 
 ---
 
-## 9. Exact Test Commands & Results
+## 11. Exact Test Commands & Results
 
 | Test Battery | Command Executed | Result |
 | :--- | :--- | :--- |
+| **LiveKit Telephony Specs** | `npm --prefix services/api test -- livekit-telephony.spec.ts` | **18 passed (18 tests)** |
 | **Payment Hardening Specs** | `npm --prefix services/api test -- payment-webhook-hardening.spec.ts` | **21 passed (21 tests)** |
 | **Payments Service Specs** | `npm --prefix services/api test -- payments.service.spec.ts` | **15 passed (15 tests)** |
 | **Integrations Service Specs** | `npm --prefix services/api test -- integrations.service.spec.ts` | **17 passed (17 tests)** |
-| **Full API Test Suite** | `npm --prefix services/api test` | **409 passed (31 test files, 100% pass)** |
-| **Web Frontend Build** | `npm --prefix apps/web run build` | **Build completed in 373ms (0 errors)** |
+| **Full API Test Suite** | `npm --prefix services/api test` | **429 passed (32 test files, 100% pass)** |
+| **Chotu AI Voice Agent Tests** | `python -m unittest discover -s services/voice-agent` | **42 passed (42 tests, 100% pass)** |
+| **Web Frontend Build** | `npm --prefix apps/web run build` | **Build completed in 758ms (0 errors)** |
 | **Web Frontend Linter** | `npm --prefix apps/web run lint` | **Finished on 61 files (0 errors)** |
 
 ---
 
-## 10. Capability Status Matrix
+## 12. Capability Status Matrix
 
 | Capability | Status | Description & Remaining Blockers |
 | :--- | :---: | :--- |
@@ -240,6 +363,10 @@ No database migrations, drops, resets, or reseed operations were performed.
 | **Webhook Idempotency** | **READY** | Transactional deduplication prevents duplicate credits on replays. |
 | **Non-Payment Webhooks (Failed/Expired)** | **READY** | Audit trails recorded without altering invoice or customer balances. |
 | **Super Admin Profile & Settings** | **READY** | Top profile card with inline display name update, role/status badges, and settings cards. |
+| **LiveKit WebRTC Audio Infrastructure** | **READY** | Scoped tokens, room lifecycle management, safe health check, audio egress recording. |
+| **LiveKit Webhook Verification** | **READY** | Full SHA256 signature verification with simulation signature restriction in production. |
+| **SIP Telephony Diagnostics** | **READY** | Masked caller ID reporting, credential isolation, and carrier status mapping. |
+| **Chotu AI LiveKit Worker** | **READY** | Pre-call consent check, token generation, 10-stage dialogue state machine. |
 | **Manual Payment Recording** | **READY** | Full support for recording direct RTGS, NEFT, Cheque, and Cash payments with audit log. |
 | **Customer DND / Cease-Contact** | **READY** | Enforced across voice, SMS, email, and WhatsApp dispatch pipelines. |
 | **Automated Reminders (Chotu)** | **BLOCKED** | Gated by `AUTOMATED_REMINDERS_ENABLED=false`. Awaiting registered WhatsApp templates. |
@@ -248,14 +375,16 @@ No database migrations, drops, resets, or reseed operations were performed.
 
 ---
 
-## 11. Actions Requiring Explicit User Approval
+## 13. Actions Requiring Explicit User Approval
 
 The following actions **require explicit operator consent** before they can be executed:
 
 1. **Configuring Production Razorpay API Keys:** Entering live Razorpay Key ID and Secret into `services/api/.env`.
-2. **Setting Live Payment Mode:** Changing `PAYMENT_SIMULATION_MODE=false` in the live production environment.
-3. **Activating Live Webhooks:** Registering production domain webhook endpoints in the Razorpay live dashboard.
-4. **Enabling Automated Reminders:** Toggling `AUTOMATED_REMINDERS_ENABLED=true` in `services/api/.env`.
-5. **Enabling Outbound Telephony:** Toggling `ENABLE_OUTBOUND_CALLS=true` in `services/api/.env`.
-6. **Initiating Real Financial Transactions:** Dispatching payment links or reminder communications to non-synthetic customer contacts.
+2. **Configuring Production LiveKit Cloud Credentials:** Entering live LiveKit URL, API Key, and Secret into `services/api/.env`.
+3. **Provisioning Carrier SIP Trunk:** Registering production outbound trunk credentials and verified caller ID in LiveKit and carrier portal.
+4. **Setting Live Payment Mode:** Changing `PAYMENT_SIMULATION_MODE=false` in the live production environment.
+5. **Activating Live Webhooks:** Registering production domain webhook endpoints in Razorpay and LiveKit Cloud dashboards.
+6. **Enabling Automated Reminders:** Toggling `AUTOMATED_REMINDERS_ENABLED=true` in `services/api/.env`.
+7. **Enabling Outbound Telephony:** Toggling `ENABLE_OUTBOUND_CALLS=true` in `services/api/.env`.
+8. **Initiating Real Financial Transactions or Voice Calls:** Dispatching payment links or voice calls to non-synthetic customer contacts.
 

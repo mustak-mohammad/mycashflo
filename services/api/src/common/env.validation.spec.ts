@@ -144,4 +144,24 @@ describe('validateEnvironment - Startup Environment Validation', () => {
       'WHATSAPP_TEST_RECIPIENT must be a valid phone number (at least 8 digits)',
     );
   });
+
+  it('should validate LIVEKIT_URL scheme', () => {
+    const configValid = { ...validConfig, LIVEKIT_URL: 'wss://my-project.livekit.cloud' };
+    expect(validateEnvironment(configValid).LIVEKIT_URL).toBe('wss://my-project.livekit.cloud');
+
+    const configInvalid = { ...validConfig, LIVEKIT_URL: 'ftp://my-project.livekit.cloud' };
+    expect(() => validateEnvironment(configInvalid)).toThrow(
+      'LIVEKIT_URL must start with wss://, ws://, https://, or http://',
+    );
+  });
+
+  it('should validate SIP_OUTBOUND_CALLER_ID format', () => {
+    const configValid = { ...validConfig, SIP_OUTBOUND_CALLER_ID: '+919876543210' };
+    expect(validateEnvironment(configValid).SIP_OUTBOUND_CALLER_ID).toBe('+919876543210');
+
+    const configInvalid = { ...validConfig, SIP_OUTBOUND_CALLER_ID: '9876543210' };
+    expect(() => validateEnvironment(configInvalid)).toThrow(
+      'SIP_OUTBOUND_CALLER_ID must be a valid E.164 phone number starting with +',
+    );
+  });
 });

@@ -16,18 +16,14 @@ myCashflo has undergone comprehensive end-to-end verification covering **Phases 
 
 | Component | Test Type | Exact Command | Verified Result | Status |
 |---|---|---|---|---|
-| **API Unit/Integration Tests** | Vitest | `npm test` (in `services/api`) | **21 suites passed, 227 tests passed** (0 failures, 5.40s) | ✅ Verified |
+| **API Unit/Integration Tests** | Vitest | `npm test` (in `services/api`) | **32 suites passed, 429 tests passed** (0 failures, 10.92s) | ✅ Verified |
+| **LiveKit Telephony Specs** | Vitest | `npm test -- livekit-telephony.spec.ts` | **18 tests passed** (Tokens, dispatch, webhooks, carrier status) | ✅ Verified |
 | **API E2E Tests** | Vitest E2E | `npm run test:e2e` (in `services/api`) | **1 file passed, 1 test passed** (`/api/health` 200 OK) | ✅ Verified |
-| **Multi-Tenant Isolation** | Unit Test Suite | `tenant-isolation.spec.ts` | **11 tests passed** (Customer, Invoice, FollowUp, Call, AuditLog, Notification, Integrations) | ✅ Verified |
+| **Multi-Tenant Isolation** | Unit Test Suite | `tenant-isolation.spec.ts` | **13 tests passed** (Customer, Invoice, FollowUp, Call, AuditLog, Notification, Integrations) | ✅ Verified |
 | **RBAC Security Suite** | Unit/Integration | `rbac.spec.ts` | **10 tests passed** (Admin powers, Agent assignment, Payment claims, Cross-tenant attacks) | ✅ Verified |
-| **RBAC & Recordings Live Suite** | Node.js REST Test | `node services/api/test/verify-rbac-and-recordings.mjs` | **All 25/25 checks passed** (Admin vs Agent permissions, payment claims, recording download/streaming, token auth) | ✅ Verified |
-| **Web Production Build** | TypeScript + Vite | `npm run build` (in `apps/web`) | **0 errors**, 266 modules transformed (3.26s) | ✅ Verified |
-| **Web Linter** | Oxlint | `npm run lint` (in `apps/web`) | **0 errors**, 48 files analyzed | ✅ Verified |
-| **Flutter Static Analysis** | Dart Analyzer | `flutter analyze` (in `apps/mobile`) | **No issues found!** (0 errors, 0 warnings) | ✅ Verified |
-| **Flutter Unit Tests** | Flutter Test | `flutter test` (in `apps/mobile`) | **8 tests passed** (ApiClient, User, Customer, ActionProposal, NotificationItem, AuditLogItem, PaymentLinkItem, TelephonyCallSession) | ✅ Verified |
-| **Flutter Android Build** | Flutter Build APK | `flutter build apk` (in `apps/mobile`) | **Built `app-release.apk` (50.2MB)** (`build/app/outputs/flutter-apk/`) | ✅ Verified |
-| **Flutter Web Build** | Flutter Build Web | `flutter build web` (in `apps/mobile`) | **Built `build/web`** | ✅ Verified |
-| **Python Voice Agent** | Python Unittest | `python -m unittest test_agent.py` | **39 tests passed** (PTP, dispute, callback, balance, confirmation, cancellation, tool execution) | ✅ Verified |
+| **Web Production Build** | TypeScript + Vite | `npm run build` (in `apps/web`) | **0 errors**, 279 modules transformed (758ms) | ✅ Verified |
+| **Web Linter** | Oxlint | `npm run lint` (in `apps/web`) | **0 errors**, 61 files analyzed | ✅ Verified |
+| **Python Voice Agent** | Python Unittest | `python -m unittest discover -s services/voice-agent` | **42 tests passed** (PTP, dispute, callback, balance, confirmation, LiveKit worker, DND) | ✅ Verified |
 | **Priority Validation Suite** | Node.js REST Test | `node scratch/validate_final_flows.mjs` | **All 33/33 checks passed** (Health, auth, token rotation, CRUD, financial reconciliation, opt-out suppression, webhook HMAC/idempotency) | ✅ Verified |
 | **Live Full-App Verification** | Node.js REST Test | `node services/api/test/verify-full-application.mjs` | **All 43/43 checks passed** (Health, auth, RBAC, AI tools, payment links, webhooks, auto-reconciliation, WhatsApp, SIP safety guard, tenant isolation) | ✅ Verified |
 | **Phase 7 Integrations Live** | Node.js REST Test | `node services/api/test/verify-phase7-live.mjs` | **All 24/24 checks passed** (Gateways, challenge verification, webhook replay deduplication) | ✅ Verified |
@@ -79,12 +75,22 @@ myCashflo has undergone comprehensive end-to-end verification covering **Phases 
   - `FollowUpsScreen`: Interactive task list with checkbox completion toggling.
 - **Verification**: `flutter analyze` reported **0 issues**. `flutter test` passed (5/5 tests).
 
-### Phase 5 — Chotu AI Voice Prototype
-- **Token Endpoint**: `POST /api/voice/token` generates scoped room tokens (`mcf-<tenantId>-<customerId>-<timestamp>`) and participant identities.
-- **Python Agent**: `services/voice-agent/agent.py` implements collection intent classification (`PROMISE_TO_PAY`, `DISPUTE`, `CALLBACK_REQUESTED`, `IN_PROGRESS`).
-- **Resilient Fallback**: Standard library `urllib` fallback ensures zero-dependency execution on clean Python environments without requiring `pip install`.
-- **Interactive Simulation**: Verified via `python agent.py --simulate`.
-- **Unit Tests**: `python -m unittest test_agent.py` passed 10/10 tests.
+### Phase 5 — Chotu AI Voice Architecture & LiveKit Telephony
+- **LiveKit Cloud Infrastructure**:
+  - `POST /api/voice/token`: Generates signed, scoped WebRTC JWT access tokens with bounded TTLs (60s–3600s, default 900s) and role-specific grants (`AGENT`, `CUSTOMER`, `OBSERVER`).
+  - `POST /api/voice/dispatch`: Dynamically dispatches the Chotu AI agent worker using `AgentDispatchClient` to live rooms.
+  - `GET /api/voice/health`: Returns sanitized LiveKit Cloud connectivity and audio egress storage health without secret disclosure.
+  - `POST /api/voice/webhook/livekit`: Secure webhook receiver validating SHA256 signatures, rejecting mock signatures in production, and deduplicating events with LRU caching.
+- **SIP Carrier Telephony Integration**:
+  - `SipTelephonyAdapter` connects LiveKit Cloud SIP trunking to enterprise carriers (Twilio, Telnyx, Tata, Airtel) using TLS/SRTP.
+  - Real-time carrier callback synchronization via `POST /api/telephony/webhook/:provider` maps `busy`, `no-answer`, `failed`, and `completed` events to `CallSession` state and audit trails.
+  - Masked outbound caller ID format validation enforcing E.164 (`+91XXXXXXXXXX`).
+- **Python Chotu AI Agent Worker (`agent.py`)**:
+  - Implements `LiveKitChotuWorker` with pre-call customer consent verification (rejecting calls with `DND:NO_CONTACT` or `preferredChannel == 'NO_CONTACT'`).
+  - Processes live audio transcripts across a 10-stage dialogue state machine preserving: hardship, refusal, dispute, claimed payments (UTR), callbacks, and explicit PTP agreements.
+- **Unit Tests**:
+  - Vitest `livekit-telephony.spec.ts`: 18 tests passed.
+  - Python `unittest`: 42 tests passed.
 
 ### Phase 6 — Collections Intelligence
 - **Backend AI Tools Catalog**:

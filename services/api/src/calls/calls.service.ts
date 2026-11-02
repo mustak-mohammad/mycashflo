@@ -589,24 +589,65 @@ export class CallsService {
   async handleTelephonyWebhook(provider: string, payload: any) {
     const callback = this.integrations?.telephony
       ? this.integrations.telephony.parseStatusCallback(payload)
-      : { callSid: payload?.CallSid || payload?.callSid || `CA_${Date.now()}`, status: 'completed', duration: 0, timestamp: new Date() };
+      : {
+          callSid: payload?.CallSid || payload?.callSid || payload?.id || `CA_${Date.now()}`,
+          status: 'completed',
+          duration: 0,
+          timestamp: new Date(),
+        };
 
     const sessions = await this.prisma.callSession.findMany({
       where: {
-        livekitRoom: `sip-${callback.callSid}`,
+        OR: [
+          { livekitRoom: `sip-${callback.callSid}` },
+          { livekitRoom: callback.callSid },
+          { id: callback.callSid },
+        ],
       },
       take: 1,
     });
 
     if (sessions.length > 0) {
       const session = sessions[0];
+      const metadata = (session.metadata as Record<string, any>) || {};
+      const updatedMetadata: Record<string, any> = {
+        ...metadata,
+        carrierStatus: callback.status,
+        lastCallbackAt: new Date().toISOString(),
+      };
+
+      if (callback.status === 'busy') {
+        updatedMetadata.busyAt = new Date().toISOString();
+      } else if (callback.status === 'failed') {
+        updatedMetadata.failedAt = new Date().toISOString();
+      }
+
+      const terminalStatuses = ['completed', 'failed', 'no-answer'];
+      const isTerminal = terminalStatuses.includes(callback.status);
+
       await this.prisma.callSession.update({
         where: { id: session.id },
         data: {
-          duration: callback.duration || session.duration,
-          endedAt: callback.status === 'completed' ? new Date() : undefined,
+          duration: callback.duration !== undefined ? callback.duration : session.duration,
+          endedAt: isTerminal ? (session.endedAt || new Date()) : session.endedAt,
+          metadata: updatedMetadata,
         },
       });
+
+      if (this.auditLogs) {
+        await this.auditLogs.log({
+          tenantId: session.tenantId,
+          userId: session.userId,
+          action: 'telephony.status_callback',
+          entityType: 'CallSession',
+          entityId: session.id,
+          metadata: {
+            callSid: callback.callSid,
+            carrierStatus: callback.status,
+            provider,
+          },
+        });
+      }
     }
 
     return { received: true, callSid: callback.callSid, status: callback.status };

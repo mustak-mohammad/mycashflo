@@ -415,7 +415,7 @@ export default function SystemSettingsPage() {
               </div>
 
               <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
-                <span className="text-slate-300">LiveKit Audio SIP</span>
+                <span className="text-slate-300">LiveKit Cloud Voice</span>
                 <span
                   className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                     settings?.providers.livekit.configured
@@ -424,6 +424,39 @@ export default function SystemSettingsPage() {
                   }`}
                 >
                   {settings?.providers.livekit.configured ? 'Configured' : 'Not configured'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
+                <span className="text-slate-300">Chotu AI Agent Worker</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono text-slate-300 bg-slate-800 border border-slate-700">
+                  {settings?.providers.livekit.agentName || 'chotu-voice-agent'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
+                <span className="text-slate-300">SIP Outbound Trunk</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    settings?.providers.sipTelephony?.outboundTrunkConfigured
+                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                      : 'bg-slate-800 text-slate-400'
+                  }`}
+                >
+                  {settings?.providers.sipTelephony?.outboundTrunkConfigured ? 'Configured' : 'Simulation Mode'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
+                <span className="text-slate-300">LiveKit Webhook Verification</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    settings?.providers.livekit.webhookConfigured
+                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                      : 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                  }`}
+                >
+                  {settings?.providers.livekit.webhookConfigured ? 'Secret Configured' : 'Default/API Secret'}
                 </span>
               </div>
 
@@ -482,6 +515,21 @@ export default function SystemSettingsPage() {
                 <span className="text-slate-300">Payment Simulation Mode</span>
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-950/80 text-amber-300 border border-amber-800">
                   {settings?.environment === 'production' ? 'Strict Live' : 'Non-Prod Simulation'}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
+                <span className="text-slate-300">Outbound PSTN Telephony</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                    settings?.securityPolicies.outboundCallsEnabled
+                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                      : 'bg-amber-950/80 text-amber-300 border border-amber-800'
+                  }`}
+                >
+                  {settings?.securityPolicies.outboundCallsEnabled
+                    ? 'Live Calling Enabled'
+                    : 'Disabled by Policy'}
                 </span>
               </div>
 

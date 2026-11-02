@@ -12,6 +12,9 @@ import type { SipSimulatedStatus } from '../interfaces/sip-client.interface.js';
 export interface SipTelephonyConfig {
   provider?: 'LIVEKIT_SIP' | 'TWILIO' | 'EXOTEL' | 'SIP_TRUNK';
   sipTrunkId?: string; // LiveKit Outbound Trunk ID (e.g. 'ST_xxx')
+  sipInboundTrunkId?: string; // LiveKit Inbound Trunk ID (e.g. 'ST_in_xxx')
+  sipDispatchRuleId?: string; // LiveKit Inbound Dispatch Rule ID
+  direction?: 'OUTBOUND' | 'INBOUND';
   sipTrunkUri?: string; // SIP Trunk domain / URI (e.g. 'sip:carrier.pstn.com')
   sipUsername?: string;
   sipPassword?: string;
@@ -173,5 +176,47 @@ export class SipTelephonyAdapter implements TelephonyGatewayAdapter {
    */
   maskSecrets(config: Record<string, any>): Record<string, any> {
     return SipRequestBuilder.maskConfig(config);
+  }
+
+  /**
+   * Safe diagnostics report for SIP carrier & LiveKit trunking posture
+   */
+  getDiagnostics(config?: SipTelephonyConfig) {
+    const isOutboundEnabled =
+      process.env.ENABLE_OUTBOUND_CALLS === 'true' &&
+      process.env.OUTBOUND_CALLS_ENABLED !== 'false';
+
+    const outboundTrunkId = config?.sipTrunkId || process.env.SIP_OUTBOUND_TRUNK_ID;
+    const inboundTrunkId = config?.sipInboundTrunkId || process.env.SIP_INBOUND_TRUNK_ID;
+    const callerId = config?.outboundCallerId || process.env.SIP_OUTBOUND_CALLER_ID;
+    const carrierHost =
+      config?.sipTrunkUri || process.env.SIP_CARRIER_HOST || 'sip.carrier.pstn.example.com';
+    const provider = config?.provider || process.env.SIP_PROVIDER_NAME || 'LIVEKIT_SIP';
+
+    const isPlaceholder = (v?: string) =>
+      !v || v.startsWith('your_') || v.includes('placeholder') || v.trim() === '';
+
+    const hasOutboundTrunk = Boolean(outboundTrunkId && !isPlaceholder(outboundTrunkId));
+    const hasInboundTrunk = Boolean(inboundTrunkId && !isPlaceholder(inboundTrunkId));
+    const hasCallerId = Boolean(callerId && !isPlaceholder(callerId) && callerId.startsWith('+'));
+
+    let maskedCallerId = 'Not set';
+    if (callerId && !isPlaceholder(callerId)) {
+      maskedCallerId = `${callerId.slice(0, 3)}****${callerId.slice(-4)}`;
+    }
+
+    return {
+      provider,
+      outboundCallsEnabled: isOutboundEnabled,
+      outboundTrunkConfigured: hasOutboundTrunk,
+      inboundTrunkConfigured: hasInboundTrunk,
+      callerIdConfigured: hasCallerId,
+      callerId: maskedCallerId,
+      carrierHost,
+      transport: 'TLS/SRTP (Encrypted SIP)',
+      safetyStatus: isOutboundEnabled
+        ? 'LIVE_DISPATCH_GATED'
+        : 'OUTBOUND_DISPATCH_DISABLED_BY_POLICY',
+    };
   }
 }

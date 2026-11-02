@@ -152,6 +152,31 @@ export function validateEnvironment(config: Record<string, unknown>): ValidatedE
     }
   }
 
+  // 14. LIVEKIT_URL (optional, must be valid URL scheme if provided)
+  if (config.LIVEKIT_URL !== undefined && config.LIVEKIT_URL !== null && config.LIVEKIT_URL !== '') {
+    const lkUrl = String(config.LIVEKIT_URL).trim();
+    if (
+      !lkUrl.startsWith('wss://') &&
+      !lkUrl.startsWith('ws://') &&
+      !lkUrl.startsWith('https://') &&
+      !lkUrl.startsWith('http://')
+    ) {
+      errors.push('LIVEKIT_URL must start with wss://, ws://, https://, or http://');
+    }
+  }
+
+  // 15. SIP_OUTBOUND_CALLER_ID (optional, must be E.164 if provided)
+  if (
+    config.SIP_OUTBOUND_CALLER_ID !== undefined &&
+    config.SIP_OUTBOUND_CALLER_ID !== null &&
+    config.SIP_OUTBOUND_CALLER_ID !== ''
+  ) {
+    const callerId = String(config.SIP_OUTBOUND_CALLER_ID).trim();
+    if (!callerId.startsWith('+') || callerId.length < 8) {
+      errors.push('SIP_OUTBOUND_CALLER_ID must be a valid E.164 phone number starting with +');
+    }
+  }
+
   if (errors.length > 0) {
     const formattedErrors = errors.map((err) => `  - ${err}`).join('\n');
     throw new Error(

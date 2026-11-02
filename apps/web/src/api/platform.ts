@@ -92,7 +92,19 @@ export interface PlatformSettings {
     stripe: { configured: boolean }
     resend: { configured: boolean }
     whatsapp: { configured: boolean }
-    livekit: { configured: boolean }
+    livekit: {
+      configured: boolean
+      agentName?: string
+      webhookConfigured?: boolean
+      egressConfigured?: boolean
+    }
+    sipTelephony?: {
+      configured: boolean
+      outboundTrunkConfigured: boolean
+      inboundTrunkConfigured: boolean
+      callerIdConfigured: boolean
+      policy: string
+    }
   }
   timestamp: string
 }

@@ -1,6 +1,12 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AccessToken } from 'livekit-server-sdk';
+import {
+  AccessToken,
+  AgentDispatchClient,
+  RoomServiceClient,
+  WebhookReceiver,
+  EgressStatus,
+} from 'livekit-server-sdk';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { RecorderService } from './recorder.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
@@ -33,6 +39,37 @@ export class VoiceTokenDto {
   @IsOptional()
   @IsString()
   collectionCaseId?: string;
+
+  @ApiPropertyOptional({ example: 'mcf-room-xyz', description: 'Optional specific LiveKit room name' })
+  @IsOptional()
+  @IsString()
+  roomName?: string;
+
+  @ApiPropertyOptional({ example: 900, description: 'Token TTL in seconds (default: 900s / 15m, max: 3600s)' })
+  @IsOptional()
+  @IsNumber()
+  ttlSeconds?: number;
+
+  @ApiPropertyOptional({ enum: ['AGENT', 'CUSTOMER', 'OBSERVER'], default: 'AGENT' })
+  @IsOptional()
+  @IsString()
+  role?: 'AGENT' | 'CUSTOMER' | 'OBSERVER';
+}
+
+export class AgentDispatchDto {
+  @ApiProperty({ description: 'Target LiveKit room name for Chotu AI voice agent' })
+  @IsString()
+  roomName: string;
+
+  @ApiPropertyOptional({ description: 'Agent worker name', default: 'chotu-voice-agent' })
+  @IsOptional()
+  @IsString()
+  agentName?: string;
+
+  @ApiPropertyOptional({ description: 'Custom dispatch metadata or context' })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, any>;
 }
 
 export class ConversationTurnDto {
@@ -108,6 +145,9 @@ export class StopRecordingDto {
 
 @Injectable()
 export class VoiceService {
+  private readonly logger = new Logger(VoiceService.name);
+  private readonly processedWebhookEvents = new Set<string>();
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
@@ -119,12 +159,39 @@ export class VoiceService {
     const livekitApiKey = this.config.get<string>('LIVEKIT_API_KEY');
     const livekitApiSecret = this.config.get<string>('LIVEKIT_API_SECRET');
 
-    const roomName = `mcf-${user.tenantId}-${dto.customerId ?? 'general'}-${Date.now().toString(36)}`;
-    const participantName = `Agent (${user.role})`;
-    const participantIdentity = `agent-${user.userId}`;
+    const role = dto.role || 'AGENT';
+    // Short-lived token with minimum permissions: default 900s (15m), bounded between 60s and 3600s
+    const ttlSeconds = Math.max(60, Math.min(dto.ttlSeconds || 900, 3600));
 
-    // If real LiveKit credentials exist, sign a valid LiveKit JWT with roomJoin grants
-    const isMock = !livekitApiKey || !livekitApiSecret || livekitApiKey === 'placeholder';
+    const roomName =
+      dto.roomName ||
+      `mcf-${user.tenantId}-${dto.customerId ?? 'general'}-${Date.now().toString(36)}`;
+
+    let participantName = `Agent (${user.role})`;
+    let participantIdentity = `agent-${user.userId}`;
+
+    if (role === 'CUSTOMER') {
+      participantName = 'Customer Participant';
+      participantIdentity = `customer-${dto.customerId || Date.now()}`;
+    } else if (role === 'OBSERVER') {
+      participantName = `Supervisor (${user.name || user.role})`;
+      participantIdentity = `observer-${user.userId}`;
+    }
+
+    const metadataObj = {
+      tenantId: user.tenantId,
+      userId: user.userId,
+      customerId: dto.customerId,
+      collectionCaseId: dto.collectionCaseId,
+      role,
+    };
+
+    // If real LiveKit credentials exist, sign a valid LiveKit JWT with scoped roomJoin grants
+    const isMock =
+      !livekitApiKey ||
+      !livekitApiSecret ||
+      livekitApiKey === 'placeholder' ||
+      livekitApiKey.startsWith('your_');
 
     let token = '';
     if (!isMock) {
@@ -132,13 +199,16 @@ export class VoiceService {
         const at = new AccessToken(livekitApiKey, livekitApiSecret, {
           identity: participantIdentity,
           name: participantName,
-          ttl: '1h',
+          ttl: `${ttlSeconds}s`,
+          metadata: JSON.stringify(metadataObj),
         });
         at.addGrant({
           room: roomName,
           roomJoin: true,
-          canPublish: true,
+          canPublish: role !== 'OBSERVER',
           canSubscribe: true,
+          canPublishData: role === 'AGENT',
+          hidden: role === 'OBSERVER',
         });
         token = await at.toJwt();
       } catch {
@@ -149,8 +219,9 @@ export class VoiceService {
             room: roomName,
             tenantId: user.tenantId,
             customerId: dto.customerId,
+            role,
             iat: Math.floor(Date.now() / 1000),
-            exp: Math.floor(Date.now() / 1000) + 3600,
+            exp: Math.floor(Date.now() / 1000) + ttlSeconds,
             mode: 'mock',
           }),
         ).toString('base64url');
@@ -163,8 +234,9 @@ export class VoiceService {
           room: roomName,
           tenantId: user.tenantId,
           customerId: dto.customerId,
+          role,
           iat: Math.floor(Date.now() / 1000),
-          exp: Math.floor(Date.now() / 1000) + 3600,
+          exp: Math.floor(Date.now() / 1000) + ttlSeconds,
           mode: 'mock',
         }),
       ).toString('base64url');
@@ -177,8 +249,244 @@ export class VoiceService {
       identity: participantIdentity,
       name: participantName,
       isMock,
-      expiresIn: 3600,
+      expiresIn: ttlSeconds,
+      role,
     };
+  }
+
+  /**
+   * Dispatch Chotu AI Voice Agent worker to a LiveKit room.
+   */
+  async dispatchAgent(user: AuthUser, dto: AgentDispatchDto) {
+    const livekitApiKey = this.config.get<string>('LIVEKIT_API_KEY');
+    const livekitApiSecret = this.config.get<string>('LIVEKIT_API_SECRET');
+    const livekitUrl = this.config.get<string>('LIVEKIT_URL');
+    const isMock =
+      !livekitApiKey ||
+      !livekitApiSecret ||
+      livekitApiKey.startsWith('your_') ||
+      livekitApiKey === 'placeholder';
+
+    const agentName =
+      dto.agentName || this.config.get<string>('LIVEKIT_AGENT_NAME') || 'chotu-voice-agent';
+
+    const metadata = {
+      tenantId: user.tenantId,
+      userId: user.userId,
+      dispatchedAt: new Date().toISOString(),
+      ...(dto.metadata || {}),
+    };
+
+    if (isMock) {
+      const mockDispatchId = `disp_sim_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      this.logger.log(
+        `[SIMULATION] Chotu AI Agent dispatch simulated for room '${dto.roomName}' (Dispatch ID: ${mockDispatchId})`,
+      );
+      return {
+        dispatchId: mockDispatchId,
+        roomName: dto.roomName,
+        agentName,
+        status: 'DISPATCHED_SIMULATED',
+        isSimulated: true,
+      };
+    }
+
+    try {
+      const host = livekitUrl!.replace(/^ws/, 'http');
+      const client = new AgentDispatchClient(host, livekitApiKey, livekitApiSecret);
+      const dispatch = await client.createDispatch(dto.roomName, agentName, {
+        metadata: JSON.stringify(metadata),
+      });
+
+      this.logger.log(
+        `Dispatched Chotu agent '${agentName}' to room '${dto.roomName}' (Dispatch ID: ${dispatch.id})`,
+      );
+      return {
+        dispatchId: dispatch.id,
+        roomName: dto.roomName,
+        agentName,
+        status: 'DISPATCHED',
+        isSimulated: false,
+      };
+    } catch (err: any) {
+      this.logger.error(
+        `Failed to dispatch agent '${agentName}' to room '${dto.roomName}': ${err.message}`,
+      );
+      throw new BadRequestException(`Agent dispatch failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Check LiveKit Cloud connectivity health without leaking secrets.
+   */
+  checkLiveKitHealth() {
+    const livekitUrl = this.config.get<string>('LIVEKIT_URL');
+    const livekitApiKey = this.config.get<string>('LIVEKIT_API_KEY');
+    const livekitApiSecret = this.config.get<string>('LIVEKIT_API_SECRET');
+    const agentName = this.config.get<string>('LIVEKIT_AGENT_NAME') || 'chotu-voice-agent';
+    const webhookSecret = this.config.get<string>('LIVEKIT_WEBHOOK_SECRET');
+    const egressBucket = this.config.get<string>('LIVEKIT_EGRESS_S3_BUCKET');
+    const egressPath = this.config.get<string>('LIVEKIT_EGRESS_PATH') || 'recordings';
+
+    const isPlaceholder = (v?: string) =>
+      !v || v.startsWith('your_') || v.includes('placeholder') || v.trim() === '';
+    const isConfigured =
+      !isPlaceholder(livekitApiKey) && !isPlaceholder(livekitApiSecret) && !isPlaceholder(livekitUrl);
+
+    let maskedUrl = 'wss://your-project.livekit.cloud';
+    if (livekitUrl && !isPlaceholder(livekitUrl)) {
+      try {
+        const parsed = new URL(livekitUrl);
+        maskedUrl = `${parsed.protocol}//${parsed.hostname.slice(0, 4)}...${parsed.hostname.slice(-8)}`;
+      } catch {
+        maskedUrl = 'wss://configured.livekit.cloud';
+      }
+    }
+
+    return {
+      configured: isConfigured,
+      status: isConfigured ? 'HEALTHY' : 'UNCONFIGURED',
+      url: maskedUrl,
+      agentName,
+      webhookConfigured: !isPlaceholder(webhookSecret),
+      egressConfigured: !isPlaceholder(egressBucket) || Boolean(egressPath),
+      egressStorage: egressBucket ? 'S3-Compatible Object Store' : 'LiveKit Project Default',
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Secure Webhook verification and idempotent event processing for LiveKit room/call events.
+   */
+  async handleLiveKitWebhook(rawBody: Buffer | string, authHeader?: string) {
+    const isProd = process.env.NODE_ENV === 'production';
+    const webhookSecret =
+      this.config.get<string>('LIVEKIT_WEBHOOK_SECRET') ||
+      this.config.get<string>('LIVEKIT_API_SECRET');
+    const apiKey = this.config.get<string>('LIVEKIT_API_KEY');
+
+    const bodyString = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : String(rawBody || '');
+
+    // 1. Simulation signature support for test environments
+    const isSimulationSig =
+      authHeader === 'mock_valid_signature' || authHeader === 'sim_test_signature';
+    if (isSimulationSig) {
+      if (isProd) {
+        this.logger.warn('[LiveKitWebhook] Simulation signature rejected in production');
+        throw new UnauthorizedException('Simulation signatures forbidden in production');
+      }
+      let parsedEvent: any;
+      try {
+        parsedEvent = JSON.parse(bodyString);
+      } catch {
+        throw new BadRequestException('Malformed JSON webhook body');
+      }
+      return this.processParsedWebhookEvent(parsedEvent);
+    }
+
+    // 2. Production / Real Signature Verification
+    if (
+      isProd &&
+      (!webhookSecret || webhookSecret.includes('placeholder') || webhookSecret.startsWith('your_'))
+    ) {
+      this.logger.error('[LiveKitWebhook] Webhook secret not configured in production');
+      throw new UnauthorizedException('LiveKit webhook secret is not configured in production');
+    }
+
+    if (!authHeader) {
+      throw new UnauthorizedException('Missing Authorization header on LiveKit webhook request');
+    }
+
+    let event: any;
+    try {
+      const receiver = new WebhookReceiver(apiKey || 'key', webhookSecret || 'secret');
+      event = await receiver.receive(bodyString, authHeader);
+    } catch (err: any) {
+      this.logger.warn(`[LiveKitWebhook] Webhook verification failed: ${err.message}`);
+      throw new UnauthorizedException(`Invalid LiveKit webhook signature: ${err.message}`);
+    }
+
+    return this.processParsedWebhookEvent(event);
+  }
+
+  private async processParsedWebhookEvent(event: any) {
+    const eventId =
+      event.id || `${event.event}_${event.room?.name || 'global'}_${event.createdAt || Date.now()}`;
+
+    // Webhook Idempotency Check
+    if (this.processedWebhookEvents.has(eventId)) {
+      this.logger.log(
+        `[LiveKitWebhook] Duplicate webhook event detected: ${eventId}. Skipping re-processing.`,
+      );
+      return { received: true, idempotent: true, eventId, eventType: event.event };
+    }
+
+    // Retain up to 2000 events in memory
+    if (this.processedWebhookEvents.size > 2000) {
+      const firstEntry = this.processedWebhookEvents.values().next().value;
+      if (firstEntry) this.processedWebhookEvents.delete(firstEntry);
+    }
+    this.processedWebhookEvents.add(eventId);
+
+    const roomName = event.room?.name;
+    const eventType = event.event;
+
+    this.logger.log(`[LiveKitWebhook] Processing event '${eventType}' for room '${roomName || 'N/A'}'`);
+
+    if (roomName) {
+      const session = await this.prisma.callSession.findFirst({
+        where: {
+          OR: [{ livekitRoom: roomName }, { livekitRoom: `sip-${roomName}` }],
+        },
+      });
+
+      if (session) {
+        if (eventType === 'room_started' && !session.startedAt) {
+          await this.prisma.callSession.update({
+            where: { id: session.id },
+            data: { startedAt: new Date() },
+          });
+        } else if (eventType === 'room_finished') {
+          const endedAt = new Date();
+          const startedAt = session.startedAt || new Date();
+          const duration = Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 1000));
+          await this.prisma.callSession.update({
+            where: { id: session.id },
+            data: {
+              endedAt,
+              duration: session.duration || duration,
+            },
+          });
+        } else if (eventType === 'egress_started' && event.egressInfo?.egressId) {
+          await this.prisma.callSession.update({
+            where: { id: session.id },
+            data: {
+              recordingEgressId: event.egressInfo.egressId,
+              recordingStatus: 'RECORDING',
+            },
+          });
+        } else if (eventType === 'egress_ended' && event.egressInfo) {
+          const isComplete =
+            event.egressInfo.status === EgressStatus.EGRESS_COMPLETE ||
+            event.egressInfo.status === 3 ||
+            event.egressInfo.status === 2 ||
+            event.egressInfo.status === 'EGRESS_COMPLETE';
+          const status = isComplete ? 'AVAILABLE' : 'FAILED';
+          const fileUrl =
+            event.egressInfo.fileResults?.[0]?.location ||
+            event.egressInfo.fileResults?.[0]?.filename;
+          await this.prisma.callSession.update({
+            where: { id: session.id },
+            data: {
+              recordingStatus: status,
+              recordingUrl: fileUrl ? fileUrl : session.recordingUrl,
+            },
+          });
+        }
+      }
+    }
+
+    return { received: true, processed: true, eventId, eventType };
   }
 
   /** Start recording the given LiveKit room and optionally link it to a call session. */

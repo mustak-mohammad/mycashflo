@@ -512,6 +512,42 @@ class TestChotuAgent(unittest.TestCase):
         self.assertIn("#INV-101 for ₹1,00,000", res["reply"])
         self.assertIn("#INV-102 for ₹50,000", res["reply"])
 
+    def test_livekit_worker_pre_call_consent_enforcement(self):
+        """Worker strictly suppresses call if customer has NO_CONTACT preference or DND note."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+
+        # 1. Active DND note suppresses call
+        self.assertFalse(worker.check_pre_call_consent(customer_notes="[DND:NO_CONTACT - Requested on 2026-10-15]"))
+        self.assertFalse(worker.check_pre_call_consent(customer_notes="Customer said NO_CONTACT please"))
+        self.assertFalse(worker.check_pre_call_consent(customer_notes="OPT_OUT confirmed"))
+
+        # 2. Preferred channel NO_CONTACT suppresses call
+        self.assertFalse(worker.check_pre_call_consent(preferred_channel="NO_CONTACT"))
+
+        # 3. Normal customer passes consent check
+        self.assertTrue(worker.check_pre_call_consent(customer_notes="Call after 2 PM", preferred_channel="CALL"))
+
+    def test_livekit_worker_token_generation(self):
+        """Worker generates valid room token with minimum permissions and expiry."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+
+        token = worker.generate_agent_token("mcf-test-room-101", ttl_seconds=600)
+        self.assertTrue(len(token) > 10)
+        self.assertIsInstance(token, str)
+
+    def test_livekit_worker_process_transcript_turn(self):
+        """Worker routes LiveKit incoming transcript through 10-stage conversation engine."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Sharma Textiles", "outstanding": "₹75,000", "extracted": {}}
+
+        # Hardship scenario via LiveKit track transcript
+        res = worker.process_incoming_transcript("We cannot pay because our cash flow is completely blocked", "ASK_FULL_PAYMENT", ctx)
+        self.assertEqual(res["next_stage"], "NEGOTIATE_AMOUNT")
+        self.assertFalse(res["should_end"])
+
 
 if __name__ == "__main__":
     unittest.main()
