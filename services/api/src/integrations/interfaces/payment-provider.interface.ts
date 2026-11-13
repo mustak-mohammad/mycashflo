@@ -7,6 +7,9 @@ export interface CreatePaymentLinkInput {
   customerPhone?: string;
   description?: string;
   callbackUrl?: string;
+  tenantId?: string;
+  invoiceId?: string;
+  notifyCustomer?: boolean;
 }
 
 export interface PaymentLinkOutput {
@@ -24,11 +27,21 @@ export interface WebhookVerificationResult {
   isValid: boolean;
   event: string;
   providerPaymentId?: string;
+  providerOrderId?: string;
+  providerRefundId?: string;
   paymentLinkId?: string;
   invoiceNumber?: string;
   amount?: number;
   currency?: string;
-  status?: 'COMPLETED' | 'FAILED' | 'PENDING' | 'CANCELLED' | 'EXPIRED';
+  status?:
+    | 'COMPLETED'
+    | 'FAILED'
+    | 'PENDING'
+    | 'CANCELLED'
+    | 'EXPIRED'
+    | 'REFUND_PENDING'
+    | 'REFUND_PROCESSED'
+    | 'REFUND_FAILED';
   metadata?: Record<string, any>;
   rawPayload?: any;
 }

@@ -1,8 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { RazorpayAdapter } from './adapters/razorpay.adapter.js';
+import {
+  INTEGRATION_SECRET_KEYS,
+  isEncryptedSecret,
+  isIntegrationSecretField,
+  encryptIntegrationSecret,
+  decryptIntegrationConfig,
+} from '../common/secret-encryption.util.js';
+import { RazorpayAdapter, isPlaceholderCredential } from './adapters/razorpay.adapter.js';
 import { StripeAdapter } from './adapters/stripe.adapter.js';
 import { WhatsAppCloudAdapter } from './adapters/whatsapp-cloud.adapter.js';
 import { SipTelephonyAdapter } from './adapters/sip-telephony.adapter.js';
@@ -11,6 +18,8 @@ import { SmsGatewayAdapter } from './adapters/sms-gateway.adapter.js';
 
 @Injectable()
 export class IntegrationsService {
+  private readonly logger = new Logger(IntegrationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditLogs: AuditLogsService,
@@ -24,14 +33,15 @@ export class IntegrationsService {
 
   private maskSecret(val: string | undefined): string {
     if (!val || typeof val !== 'string') return '';
+    // Encrypted secrets never expose ciphertext bytes or plaintext substrings in masked responses
+    if (isEncryptedSecret(val)) return '****...****';
     if (val.length <= 8) return '********';
     return `${val.substring(0, 4)}...${val.substring(val.length - 4)}`;
   }
 
   private maskConfig(config: Record<string, any>): Record<string, any> {
     const masked: Record<string, any> = { ...config };
-    const secretKeys = ['keySecret', 'secretKey', 'authToken', 'accessToken', 'webhookSecret', 'appSecret', 'apiKey', 'sipPassword'];
-    for (const key of secretKeys) {
+    for (const key of INTEGRATION_SECRET_KEYS) {
       if (masked[key]) {
         masked[key] = this.maskSecret(masked[key]);
       }
@@ -90,13 +100,72 @@ export class IntegrationsService {
       },
     });
 
-    const mergedConfig: Record<string, any> = { ...(existing?.config as any || {}) };
+    const existingRaw = (existing?.config as Record<string, any>) || {};
+    const mergedPlainOrEncrypted: Record<string, any> = { ...existingRaw };
     for (const [key, val] of Object.entries(dto.config || {})) {
       if (typeof val === 'string' && val.includes('...')) {
-        // User submitted the masked string back, preserve original value
+        // User submitted the masked string back, preserve original stored secret
         continue;
       }
-      mergedConfig[key] = val;
+      if (isIntegrationSecretField(key) && isEncryptedSecret(val)) {
+        throw new BadRequestException('Encrypted envelope prefix cannot be submitted directly');
+      }
+      mergedPlainOrEncrypted[key] = val;
+    }
+
+    if (normalizedProvider === 'RAZORPAY') {
+      const isProd = process.env.NODE_ENV === 'production';
+      const candidateKeyId =
+        typeof mergedPlainOrEncrypted.keyId === 'string' ? mergedPlainOrEncrypted.keyId.trim() : '';
+      const candidateKeySecret =
+        typeof mergedPlainOrEncrypted.keySecret === 'string' &&
+        !isEncryptedSecret(mergedPlainOrEncrypted.keySecret)
+          ? mergedPlainOrEncrypted.keySecret.trim()
+          : '';
+      const candidateWebhookSecret =
+        typeof mergedPlainOrEncrypted.webhookSecret === 'string' &&
+        !isEncryptedSecret(mergedPlainOrEncrypted.webhookSecret)
+          ? mergedPlainOrEncrypted.webhookSecret.trim()
+          : '';
+
+      if (!isProd && candidateKeyId.startsWith('rzp_live_')) {
+        throw new BadRequestException(
+          'SAFETY GUARD: Live Razorpay credentials (rzp_live_*) cannot be saved outside production.',
+        );
+      }
+
+      if (
+        (candidateKeyId && isPlaceholderCredential(candidateKeyId)) ||
+        (candidateKeySecret && isPlaceholderCredential(candidateKeySecret)) ||
+        (candidateWebhookSecret && isPlaceholderCredential(candidateWebhookSecret))
+      ) {
+        throw new BadRequestException(
+          'Razorpay configuration cannot contain placeholder or mock credential values.',
+        );
+      }
+
+      if (
+        candidateKeyId &&
+        !candidateKeyId.startsWith('rzp_test_') &&
+        !candidateKeyId.startsWith('rzp_live_')
+      ) {
+        throw new BadRequestException(
+          'Invalid Razorpay Key ID format. Expected rzp_test_* or rzp_live_*.',
+        );
+      }
+    }
+
+    // Encrypt all non-empty plaintext secret fields at rest (fails closed if INTEGRATION_ENCRYPTION_KEY is missing/invalid)
+    const encryptedConfigToStore: Record<string, any> = { ...mergedPlainOrEncrypted };
+    for (const field of INTEGRATION_SECRET_KEYS) {
+      const val = encryptedConfigToStore[field];
+      if (typeof val === 'string' && val.trim() !== '' && !isEncryptedSecret(val)) {
+        encryptedConfigToStore[field] = encryptIntegrationSecret(val, {
+          tenantId,
+          provider: normalizedProvider,
+          field,
+        });
+      }
     }
 
     const saved = await this.prisma.integrationConfig.upsert({
@@ -107,12 +176,12 @@ export class IntegrationsService {
         },
       },
       update: {
-        config: mergedConfig,
+        config: encryptedConfigToStore,
         isActive: dto.isActive !== undefined ? dto.isActive : existing?.isActive ?? true,
       },
       create: {
         provider: normalizedProvider,
-        config: mergedConfig,
+        config: encryptedConfigToStore,
         isActive: dto.isActive ?? true,
         tenantId,
       },
@@ -149,7 +218,16 @@ export class IntegrationsService {
       },
     });
 
-    const config = (existing?.config as Record<string, any>) || {};
+    const rawStored = (existing?.config as Record<string, any>) || {};
+    const { config, hasLegacyPlaintextSecrets } = decryptIntegrationConfig(rawStored, {
+      tenantId,
+      provider: normalizedProvider,
+    });
+    if (hasLegacyPlaintextSecrets) {
+      this.logger.warn(
+        `Legacy plaintext integration secret detected for tenant ${tenantId} provider ${normalizedProvider}. Re-save or run migration to encrypt at rest.`,
+      );
+    }
 
     switch (normalizedProvider) {
       case 'RAZORPAY': {
@@ -308,14 +386,25 @@ export class IntegrationsService {
   }
 
   async getRawConfig(tenantId: string, provider: string): Promise<Record<string, any>> {
+    const normalizedProvider = provider.toUpperCase();
     const existing = await this.prisma.integrationConfig.findUnique({
       where: {
         provider_tenantId: {
-          provider: provider.toUpperCase(),
+          provider: normalizedProvider,
           tenantId,
         },
       },
     });
-    return (existing?.config as Record<string, any>) || {};
+    const rawStored = (existing?.config as Record<string, any>) || {};
+    const { config, hasLegacyPlaintextSecrets } = decryptIntegrationConfig(rawStored, {
+      tenantId,
+      provider: normalizedProvider,
+    });
+    if (hasLegacyPlaintextSecrets) {
+      this.logger.warn(
+        `Legacy plaintext integration secret detected for tenant ${tenantId} provider ${normalizedProvider}. Re-save or run migration to encrypt at rest.`,
+      );
+    }
+    return config;
   }
 }

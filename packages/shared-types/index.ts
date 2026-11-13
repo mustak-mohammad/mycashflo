@@ -56,14 +56,54 @@ export interface Invoice {
   id: string
   number: string
   customerId: string
-  customerName: string
+  customerName?: string
+  customer?: { id?: string; name: string }
   amount: number
   outstanding: number
   currency: string
   status: 'DRAFT' | 'OPEN' | 'PARTIALLY_PAID' | 'PAID' | 'OVERDUE' | 'CANCELLED'
+  description?: string | null
   issueDate: string
   dueDate: string
   tenantId: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export type PaymentMethod =
+  | 'BANK_TRANSFER'
+  | 'UPI'
+  | 'CHEQUE'
+  | 'CASH'
+  | 'CARD'
+  | 'PAYMENT_LINK'
+  | 'OTHER'
+
+export type PaymentStatus = 'PENDING' | 'COMPLETED' | 'FAILED' | 'REFUNDED'
+
+export interface Payment {
+  id: string
+  ref: string
+  customerId: string
+  customer?: { id: string; name: string }
+  invoiceId: string
+  invoice?: { id: string; number: string }
+  amount: number
+  currency: string
+  method: PaymentMethod
+  status: PaymentStatus
+  providerRef?: string | null
+  paidAt?: string | null
+  notes?: string | null
+  tenantId: string
+  createdAt: string
+  updatedAt?: string
+}
+
+export interface PaymentStats {
+  totalCollected: number
+  totalPayments: number
+  byMethod: Array<{ method: string; amount: number; count: number }>
 }
 
 export interface DashboardMetrics {
@@ -322,13 +362,153 @@ export interface PaymentLinkRequest {
 
 export interface PaymentLinkResponse {
   paymentLinkId: string
+  paymentId?: string
   provider: 'RAZORPAY' | 'STRIPE'
   shortUrl: string
   amount: number
   currency: string
   status: string
   invoiceId: string
+  invoiceNumber?: string
   isSimulated: boolean
+}
+
+// ── Document Delivery & Verification ──────────────────────────────────────────
+
+export type CallType = 'COLLECTIONS' | 'DISPUTE' | 'CALLBACK'
+
+export type DocumentRequestType = 'INVOICE' | 'PAYMENT_LINK' | 'BOTH'
+export type DeliveryChannelPreference = 'WHATSAPP' | 'EMAIL' | 'WHATSAPP_AND_EMAIL'
+export type DocumentDeliveryStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'COMPLETED'
+  | 'PARTIAL_SUCCESS'
+  | 'FAILED'
+  | 'CANCELLED'
+export type DeliveryAttemptChannel = 'WHATSAPP' | 'EMAIL'
+export type DeliveryAttemptStatus =
+  | 'PENDING'
+  | 'SENT'
+  | 'DELIVERED'
+  | 'FAILED'
+  | 'SIMULATED'
+  | 'SKIPPED'
+
+export interface DeliveryAttempt {
+  id: string
+  tenantId: string
+  requestId: string
+  channel: DeliveryAttemptChannel
+  destinationMasked: string
+  status: DeliveryAttemptStatus
+  provider: string
+  providerMessageId?: string | null
+  errorCode?: string | null
+  errorMessage?: string | null
+  sentAt?: string | null
+  deliveredAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DocumentDeliveryRequest {
+  id: string
+  tenantId: string
+  customerId: string
+  invoiceId: string
+  callSessionId?: string | null
+  requestType: DocumentRequestType
+  deliveryChannel: DeliveryChannelPreference
+  status: DocumentDeliveryStatus
+  requestedBy: string
+  idempotencyKey?: string | null
+  metadata?: Record<string, any> | null
+  requestedAt: string
+  createdAt: string
+  updatedAt: string
+  customer?: { id: string; name: string; phone?: string; email?: string }
+  invoice?: { id: string; number: string; amount: number; outstanding: number; status: string }
+  attempts?: DeliveryAttempt[]
+}
+
+export interface CreateDocumentDeliveryDto {
+  customerId: string
+  invoiceId?: string
+  callSessionId?: string
+  requestType?: DocumentRequestType
+  deliveryChannel?: DeliveryChannelPreference
+  requestedBy?: string
+  resend?: boolean
+  idempotencyKey?: string
+  notes?: string
+}
+
+export interface DocumentDeliveryResponse {
+  request: DocumentDeliveryRequest
+  isDuplicate: boolean
+  message?: string
+}
+
+export interface SignedInvoicePayload {
+  tenantId: string
+  invoiceId: string
+  customerId: string
+  exp: number
+}
+
+export interface StructuredCallSummary {
+  customerName: string
+  customerId?: string
+  invoiceNumber?: string
+  callDateTime: string
+  durationSeconds: number
+  formattedDuration: string
+  callType: CallType
+  reasonForCall: string
+  customerMainResponse: string
+  outcomeCategory: string
+  paymentCommitment: 'NONE' | 'TENTATIVE' | 'CONFIRMED'
+  commitmentAmount?: string | null
+  commitmentDate?: string | null
+  paymentMethod?: string | null
+  customerReportedPayment?: {
+    claimedAmount?: string | null
+    claimedDate?: string | null
+    utrOrReference?: string | null
+  } | null
+  disputeDetails?: {
+    reason?: string | null
+    disputedAmount?: string | null
+  } | null
+  callbackRequest?: {
+    requestedTime?: string | null
+    preferredContact?: string | null
+  } | null
+  humanHandoffRequested: boolean
+  noContactStatus?: {
+    isNoContact: boolean
+    reason?: string | null
+  } | null
+  nextAction: string
+  shortSummary: string
+  documentDelivery?: {
+    requestType: string
+    invoiceNumber: string
+    deliveryChannel: string
+    status: string
+    requestedAt?: string
+    paymentLinkUrl?: string | null
+    attempts?: Array<{
+      channel: string
+      destinationMasked: string
+      status: string
+      errorMessage?: string | null
+      provider?: string
+      sentAt?: string | null
+      deliveredAt?: string | null
+    }>
+  } | null
 }
 
 export interface TelephonyCallRequest {

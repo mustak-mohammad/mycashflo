@@ -360,7 +360,10 @@ export class IntelligenceService {
       where: { id: customerId, tenantId },
       include: {
         invoices: {
-          where: { outstanding: { gt: 0 } },
+          where: {
+            status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+            outstanding: { gt: 0 },
+          },
         },
       },
     });
@@ -368,7 +371,14 @@ export class IntelligenceService {
     if (!customer) throw new NotFoundException('Customer not found');
 
     const now = new Date();
-    const overdueInvoices = customer.invoices.filter((inv) => new Date(inv.dueDate) < now);
+    const overdueInvoices = customer.invoices.filter(
+      (inv: any) =>
+        inv.status !== InvoiceStatus.CANCELLED &&
+        inv.status !== InvoiceStatus.PAID &&
+        inv.status !== InvoiceStatus.DRAFT &&
+        Number(inv.outstanding) > 0 &&
+        (inv.status === InvoiceStatus.OVERDUE || new Date(inv.dueDate) < now),
+    );
     const overdueAmount = overdueInvoices.reduce((acc, inv) => acc + Number(inv.outstanding), 0);
 
     return {
@@ -397,8 +407,9 @@ export class IntelligenceService {
       where: {
         customerId,
         tenantId,
+        status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
         outstanding: { gt: 0 },
-        dueDate: { lt: now },
+        OR: [{ status: InvoiceStatus.OVERDUE }, { dueDate: { lt: now } }],
       },
       orderBy: { dueDate: 'asc' },
     });
@@ -511,6 +522,9 @@ export class IntelligenceService {
 
     if (!customer) throw new NotFoundException('Customer not found');
     if (!invoice) throw new NotFoundException('Invoice not found');
+    if (invoice.status === InvoiceStatus.CANCELLED || invoice.status === InvoiceStatus.PAID) {
+      throw new BadRequestException(`Cannot record promise to pay for an invoice with status ${invoice.status}`);
+    }
 
     // Create payment promise
     const promise = await this.prisma.paymentPromise.create({
@@ -568,6 +582,9 @@ export class IntelligenceService {
 
     if (!customer) throw new NotFoundException('Customer not found');
     if (!invoice) throw new NotFoundException('Invoice not found');
+    if (invoice.status === InvoiceStatus.CANCELLED || invoice.status === InvoiceStatus.PAID) {
+      throw new BadRequestException(`Cannot dispute an invoice with status ${invoice.status}`);
+    }
 
     // Create or update collection case for dispute
     let colCase = await this.prisma.collectionCase.findFirst({

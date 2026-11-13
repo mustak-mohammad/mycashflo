@@ -1,10 +1,13 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { PageHeader } from '../components/ui/PageHeader'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
 import { useApi } from '../hooks/useApi'
 import { paymentsApi } from '../api/payments'
 import { invoicesApi } from '../api/invoices'
 import { useAuth } from '../store/AuthContext'
+import { useToast } from '../store/ToastContext'
+import { extractSafeErrorMessage } from '../utils/safeError'
 import type { Payment, Invoice } from '../types'
 
 function fmt(n: number) {
@@ -40,21 +43,27 @@ const METHOD_LABELS: Record<string, string> = {
 
 export default function PaymentsPage() {
   const { user } = useAuth()
+  const toast = useToast()
   const isAgent = user?.role === 'AGENT'
   const [refreshKey, setRefreshKey] = useState(0)
 
   // Record / Claim Payment Modal State
   const [isRecordOpen, setIsRecordOpen] = useState(false)
   const [unpaidInvoices, setUnpaidInvoices] = useState<Invoice[]>([])
+  const [unpaidLoadError, setUnpaidLoadError] = useState<string | null>(null)
   const [targetInvoiceId, setTargetInvoiceId] = useState('')
   const [payAmount, setPayAmount] = useState('')
-  const [payDate, setPayDate] = useState(new Date().toISOString().slice(0, 10))
+  const [payDate, setPayDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [payRef, setPayRef] = useState('')
   const [payEvidence, setPayEvidence] = useState('')
   const [payMethod, setPayMethod] = useState('BANK_TRANSFER')
   const [payNotes, setPayNotes] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
+  const [verifyTarget, setVerifyTarget] = useState<Payment | null>(null)
+  const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const verifyInFlightRef = useRef(false)
   const [recordError, setRecordError] = useState<string | null>(null)
 
   const fetcher = useCallback(
@@ -65,14 +74,22 @@ export default function PaymentsPage() {
   const { data, loading, error } = useApi(fetcher)
 
   useEffect(() => {
-    invoicesApi.list({ limit: 100 }).then((res) => {
-      const openInvs = res.data.filter((i) => i.outstanding > 0)
-      setUnpaidInvoices(openInvs)
-      if (openInvs.length > 0 && !targetInvoiceId) {
-        setTargetInvoiceId(openInvs[0].id)
-        setPayAmount(String(openInvs[0].outstanding))
-      }
-    }).catch(console.error)
+    invoicesApi
+      .list({ limit: 100 })
+      .then((res) => {
+        const openInvs = res.data.filter((i) => i.outstanding > 0 && i.status !== 'CANCELLED')
+        setUnpaidInvoices(openInvs)
+        setUnpaidLoadError(null)
+        if (openInvs.length > 0 && !targetInvoiceId) {
+          setTargetInvoiceId(openInvs[0].id)
+          setPayAmount(String(openInvs[0].outstanding))
+        }
+      })
+      .catch((err) => {
+        setUnpaidLoadError(
+          extractSafeErrorMessage(err, 'Unable to load open invoices for settlement.'),
+        )
+      })
   }, [refreshKey])
 
   const handleSelectInvoice = (id: string) => {
@@ -120,30 +137,44 @@ export default function PaymentsPage() {
           notes: payNotes.trim() || undefined,
         })
       }
+      toast.success(
+        isAgent
+          ? `Payment claim ${payRef.trim()} submitted for verification.`
+          : `Payment ${payRef.trim()} recorded cleanly.`,
+      )
       setIsRecordOpen(false)
       setPayRef('')
       setPayEvidence('')
       setPayNotes('')
       setRefreshKey((k) => k + 1)
-    } catch (err: any) {
-      setRecordError(err?.response?.data?.message || err.message || 'Failed to submit payment.')
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to submit payment.')
+      setRecordError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
   }
 
-  const handleVerifyClaim = async (paymentId: string) => {
-    if (!confirm('Verify and reconcile this customer payment claim? This will settle the invoice balance and update the customer ledger.')) {
-      return
-    }
-    setVerifyingId(paymentId)
+  const handleConfirmVerifyClaim = async () => {
+    if (!verifyTarget || verifyInFlightRef.current) return
+    verifyInFlightRef.current = true
+    setVerifyingId(verifyTarget.id)
+    setVerifyError(null)
+    setActionError(null)
     try {
-      await paymentsApi.verifyPaymentClaim(paymentId)
+      await paymentsApi.verifyPaymentClaim(verifyTarget.id)
+      toast.success(`Payment claim ${verifyTarget.ref} verified and reconciled.`)
+      setVerifyTarget(null)
       setRefreshKey((k) => k + 1)
-    } catch (err: any) {
-      alert(`Verification failed: ${err?.response?.data?.message || err.message}`)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to verify payment claim.')
+      setVerifyError(msg)
+      setActionError(msg)
+      toast.error(msg)
     } finally {
       setVerifyingId(null)
+      verifyInFlightRef.current = false
     }
   }
 
@@ -186,8 +217,19 @@ export default function PaymentsPage() {
       />
 
       <div className="rounded-xl overflow-hidden" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-        {error && (
-          <div className="px-5 py-3 text-sm" style={{ color: 'var(--danger)' }}>⚠️ {error}</div>
+        {(error || actionError) && (
+          <div role="alert" className="px-5 py-3 text-sm flex items-center justify-between gap-3" style={{ color: 'var(--danger)' }}>
+            <span>⚠️ {actionError || error}</span>
+            {actionError && (
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                className="text-xs underline cursor-pointer bg-transparent border-none text-current"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
         )}
 
         <div className="overflow-x-auto">
@@ -244,7 +286,10 @@ export default function PaymentsPage() {
                         {!isAgent && isPending ? (
                           <button
                             type="button"
-                            onClick={() => handleVerifyClaim(p.id)}
+                            onClick={() => {
+                              setVerifyError(null)
+                              setVerifyTarget(p)
+                            }}
                             disabled={verifyingId === p.id}
                             className="px-2.5 py-1 rounded text-xs font-semibold bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30 cursor-pointer transition-colors"
                           >
@@ -287,9 +332,9 @@ export default function PaymentsPage() {
             </div>
 
             <form onSubmit={handleRecordOrClaim} className="p-6 space-y-4 text-xs">
-              {recordError && (
-                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300">
-                  ⚠️ {recordError}
+              {(recordError || unpaidLoadError) && (
+                <div role="alert" className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300">
+                  ⚠️ {recordError || unpaidLoadError}
                 </div>
               )}
 
@@ -420,6 +465,25 @@ export default function PaymentsPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={Boolean(verifyTarget)}
+        title="Verify Payment Claim"
+        description={
+          verifyTarget
+            ? `Verify and reconcile payment claim ${verifyTarget.ref} (${fmt(Number(verifyTarget.amount))})? This will settle the invoice balance and update the customer ledger.`
+            : ''
+        }
+        confirmLabel="Confirm Verification"
+        variant="primary"
+        loading={Boolean(verifyTarget && verifyingId === verifyTarget.id)}
+        errorMessage={verifyError}
+        onCancel={() => {
+          setVerifyTarget(null)
+          setVerifyError(null)
+        }}
+        onConfirm={handleConfirmVerifyClaim}
+      />
     </div>
   )
 }

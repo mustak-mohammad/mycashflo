@@ -105,6 +105,88 @@ export type CallOutcome =
   | 'UNABLE_TO_PAY'
   | 'PAYMENT_CLAIMED'
 
+import type {
+  CallType,
+  DocumentRequestType,
+  DeliveryChannelPreference,
+  DocumentDeliveryStatus,
+  DeliveryAttemptChannel,
+  DeliveryAttemptStatus,
+  DeliveryAttempt,
+  DocumentDeliveryRequest,
+  CreateDocumentDeliveryDto,
+  DocumentDeliveryResponse,
+  SignedInvoicePayload,
+} from '../../../../packages/shared-types'
+
+export type {
+  CallType,
+  DocumentRequestType,
+  DeliveryChannelPreference,
+  DocumentDeliveryStatus,
+  DeliveryAttemptChannel,
+  DeliveryAttemptStatus,
+  DeliveryAttempt,
+  DocumentDeliveryRequest,
+  CreateDocumentDeliveryDto,
+  DocumentDeliveryResponse,
+  SignedInvoicePayload,
+}
+
+export interface StructuredCallSummary {
+  customerName: string
+  customerId?: string
+  invoiceNumber?: string
+  callDateTime: string
+  durationSeconds: number
+  formattedDuration: string
+  callType: CallType
+  reasonForCall: string
+  customerMainResponse: string
+  outcomeCategory: string
+  paymentCommitment: 'NONE' | 'TENTATIVE' | 'CONFIRMED'
+  commitmentAmount?: string | null
+  commitmentDate?: string | null
+  paymentMethod?: string | null
+  customerReportedPayment?: {
+    claimedAmount?: string | null
+    claimedDate?: string | null
+    utrOrReference?: string | null
+  } | null
+  disputeDetails?: {
+    reason?: string | null
+    disputedAmount?: string | null
+  } | null
+  callbackRequest?: {
+    requestedTime?: string | null
+    preferredContact?: string | null
+  } | null
+  humanHandoffRequested: boolean
+  noContactStatus?: {
+    isNoContact: boolean
+    reason?: string | null
+  } | null
+  nextAction: string
+  shortSummary: string
+  documentDelivery?: {
+    requestType: string
+    invoiceNumber: string
+    deliveryChannel: string
+    status: string
+    requestedAt?: string
+    paymentLinkUrl?: string | null
+    attempts?: Array<{
+      channel: string
+      destinationMasked: string
+      status: string
+      errorMessage?: string | null
+      provider?: string
+      sentAt?: string | null
+      deliveredAt?: string | null
+    }>
+  } | null
+}
+
 export interface CallSession {
   id: string
   customerId?: string
@@ -114,6 +196,8 @@ export interface CallSession {
   outcome?: CallOutcome
   transcript?: string
   summary?: string
+  stage?: string
+  metadata?: Record<string, any>
   startedAt: string
   endedAt?: string
   recordingStatus?: 'RECORDING' | 'PROCESSING' | 'AVAILABLE' | 'FAILED'
@@ -371,6 +455,122 @@ export interface PaymentLinkResponse {
   invoiceId: string
   invoiceNumber: string
   isSimulated: boolean
+}
+
+// ── Razorpay Orders API & Standard Checkout (Test Mode Only) ──────────────────
+export interface CreateRazorpayOrderDto {
+  invoiceId: string
+  amount?: number
+  currency?: string
+  simulate?: boolean
+  idempotencyKey?: string
+}
+
+export interface RazorpayOrderResponse {
+  orderId: string
+  paymentId: string
+  provider: 'RAZORPAY'
+  keyId: string
+  amount: number
+  amountInPaise: number
+  currency: string
+  receipt?: string
+  invoiceId: string
+  invoiceNumber: string
+  customerName: string
+  customerEmail: string
+  customerPhone: string
+  status: 'CREATED'
+  reusedExistingOrder: boolean
+  recovered?: boolean
+  isSimulated: boolean
+}
+
+export interface VerifyRazorpayPaymentDto {
+  invoiceId: string
+  razorpay_order_id: string
+  razorpay_payment_id: string
+  razorpay_signature: string
+}
+
+export interface VerifyRazorpayPaymentResponse {
+  verified: boolean
+  idempotent: boolean
+  status: 'COMPLETED' | 'PENDING' | 'FAILED' | 'REFUNDED'
+  orderId: string
+  providerPaymentId?: string
+  paymentId?: string
+  invoiceId: string
+  invoiceNumber: string
+  paidAmount?: number
+  remainingOutstanding?: number
+  overpaymentDetected?: boolean
+  overpaymentAmount?: number
+  invoiceStatus?: 'DRAFT' | 'OPEN' | 'PARTIALLY_PAID' | 'PAID' | 'OVERDUE' | 'CANCELLED' | string
+  message?: string
+}
+
+export interface RazorpaySuccessResponse {
+  razorpay_payment_id: string
+  razorpay_order_id: string
+  razorpay_signature: string
+}
+
+export interface RazorpayFailureResponse {
+  error: {
+    code: string
+    description: string
+    source?: string
+    step?: string
+    reason?: string
+    metadata?: {
+      order_id?: string
+      payment_id?: string
+    }
+  }
+}
+
+export interface RazorpayCheckoutOptions {
+  key: string
+  amount: number
+  currency: string
+  name: string
+  description?: string
+  image?: string
+  order_id: string
+  prefill?: {
+    name?: string
+    email?: string
+    contact?: string
+  }
+  notes?: Record<string, string>
+  theme?: {
+    color?: string
+    backdrop_color?: string
+  }
+  modal?: {
+    ondismiss?: () => void
+    escape?: boolean
+    backdropclose?: boolean
+    animation?: boolean
+  }
+  handler: (response: RazorpaySuccessResponse) => void
+}
+
+export interface RazorpayInstance {
+  open: () => void
+  close?: () => void
+  on: (event: 'payment.failed', handler: (response: RazorpayFailureResponse) => void) => void
+}
+
+export interface RazorpayConstructor {
+  new (options: RazorpayCheckoutOptions): RazorpayInstance
+}
+
+declare global {
+  interface Window {
+    Razorpay?: RazorpayConstructor
+  }
 }
 
 export interface TelephonyCallResponse {

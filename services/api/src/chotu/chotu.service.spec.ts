@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { ChotuService } from './chotu.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
+import { InvoiceStatus } from '@prisma/client';
 
 describe('ChotuService — Application-Wide Chatbot', () => {
   let service: ChotuService;
@@ -220,6 +221,79 @@ describe('ChotuService — Application-Wide Chatbot', () => {
       expect(res.reply).toContain('PAY-SIM-1234');
       expect(res.reply).toContain('₹15,000');
       expect(res.reply).toContain('Sandbox Simulation');
+    });
+  });
+
+  describe('5. Cancelled Invoice Financial Exclusion', () => {
+    it('should query only active receivable statuses for receivables overview', async () => {
+      mockPrisma.invoice.findMany.mockResolvedValue([
+        { outstanding: 25000, dueDate: new Date(Date.now() + 86400000), status: InvoiceStatus.OPEN },
+      ]);
+
+      const res = await service.processChat(mockAdminUser, {
+        message: 'Give me an overview of outstanding invoices.',
+      });
+
+      expect(mockPrisma.invoice.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+            outstanding: { gt: 0 },
+          }),
+        }),
+      );
+      expect(res.reply).toContain('₹25,000');
+    });
+
+    it('should query only active receivable statuses for overdue invoices list', async () => {
+      mockPrisma.invoice.findMany.mockResolvedValue([]);
+      mockPrisma.invoice.count.mockResolvedValue(0);
+
+      await service.processChat(mockAdminUser, {
+        message: 'Which invoices are overdue?',
+      });
+
+      expect(mockPrisma.invoice.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+            outstanding: { gt: 0 },
+          }),
+        }),
+      );
+    });
+
+    it('should exclude CANCELLED invoices from customer overview overdue calculations', async () => {
+      const pastDate = new Date(Date.now() - 86400000 * 5);
+      mockPrisma.customer.findMany.mockResolvedValue([
+        {
+          id: 'cust_sharma',
+          name: 'Sharma Industries',
+          company: 'Sharma Industries',
+          tenantId: 'tenant_01',
+          status: 'ACTIVE',
+        },
+      ]);
+      mockPrisma.customer.findUnique.mockResolvedValue({
+        id: 'cust_sharma',
+        name: 'Sharma Industries',
+        company: 'Sharma Industries',
+        outstandingBalance: 25000,
+        status: 'ACTIVE',
+        invoices: [
+          { id: 'inv_active', number: 'INV-ACT-1', amount: 25000, outstanding: 25000, dueDate: pastDate, status: InvoiceStatus.OVERDUE },
+          { id: 'inv_canc', number: 'INV-CANC-1', amount: 5000, outstanding: 5000, dueDate: pastDate, status: InvoiceStatus.CANCELLED },
+        ],
+        payments: [],
+      });
+
+      const res = await service.processChat(mockAdminUser, {
+        message: 'Show account for Sharma Industries',
+      });
+
+      // Total overdue must only sum the active overdue invoice (25,000), ignoring the cancelled 5,000
+      expect(res.reply).toContain('Total Overdue Amount:** ₹25,000');
+      expect(res.reply).not.toContain('₹30,000');
     });
   });
 });

@@ -6,7 +6,14 @@ import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsString, IsNumber, IsDateString, IsOptional, IsEnum } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { InvoiceStatus } from '@prisma/client';
+import {
+  InvoiceStatus,
+  PaymentStatus,
+  OrderIntentStatus,
+  RefundStatus,
+  CaseStatus,
+  PromiseStatus,
+} from '@prisma/client';
 
 export class CreateInvoiceDto {
   @ApiProperty({ example: 'INV-2024-001' }) @IsString() number: string;
@@ -276,18 +283,230 @@ export class InvoicesService {
     return invoice;
   }
 
+  private async acquireCustomerAndInvoiceLocksTx(
+    tx: any,
+    customerId: string,
+    invoiceId: string,
+    tenantId: string,
+  ): Promise<void> {
+    if (typeof tx.$queryRaw !== 'function') {
+      return;
+    }
+    try {
+      await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${customerId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "Invoice" WHERE id = ${invoiceId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+    } catch (lockErr: any) {
+      const isTestEnv = process.env.NODE_ENV === 'test';
+      const hasPgErrorCode = Boolean(lockErr?.code || lockErr?.meta?.code);
+      if (!isTestEnv || hasPgErrorCode) {
+        throw lockErr;
+      }
+    }
+  }
+
   async update(id: string, user: AuthUser, dto: UpdateInvoiceDto) {
     if (user.role === 'AGENT') {
       throw new ForbiddenException('Agents are not authorized to update invoices');
     }
-    await this.findOne(id, user);
-    return this.prisma.invoice.update({
+
+    const existing = await this.findOne(id, user);
+
+    if (existing.status === InvoiceStatus.CANCELLED) {
+      if (dto.status && dto.status !== InvoiceStatus.CANCELLED) {
+        throw new BadRequestException('Cannot modify status of a CANCELLED invoice');
+      }
+      throw new BadRequestException('Cannot modify an invoice marked as CANCELLED');
+    }
+
+    if (dto.status === InvoiceStatus.PAID && existing.status !== InvoiceStatus.PAID) {
+      throw new BadRequestException(
+        'Direct transition to PAID is not permitted. Invoices are marked PAID via payment reconciliation.',
+      );
+    }
+
+    if (dto.status === InvoiceStatus.PARTIALLY_PAID && existing.status !== InvoiceStatus.PARTIALLY_PAID) {
+      throw new BadRequestException(
+        'Direct transition to PARTIALLY_PAID is not permitted. Invoices are marked PARTIALLY_PAID via payment reconciliation.',
+      );
+    }
+
+    // ── Invoice Cancellation Flow ──────────────────────────────────────────
+    if (dto.status === InvoiceStatus.CANCELLED) {
+      return this.prisma.$transaction(async (tx) => {
+        // 1. Strict lock ordering: Customer FIRST, Invoice SECOND
+        await this.acquireCustomerAndInvoiceLocksTx(tx, existing.customerId, id, user.tenantId);
+
+        // 2. Re-read fresh invoice state after acquiring row locks
+        const lockedInvoice = await tx.invoice.findFirst({
+          where: { id, tenantId: user.tenantId },
+          include: {
+            payments: true,
+            paymentOrderIntents: true,
+            paymentRefunds: true,
+            collectionCases: true,
+            paymentPromises: true,
+          },
+        });
+
+        if (!lockedInvoice) {
+          throw new NotFoundException('Invoice not found');
+        }
+
+        if (lockedInvoice.status === InvoiceStatus.CANCELLED) {
+          throw new BadRequestException('Invoice is already marked as CANCELLED');
+        }
+
+        if (lockedInvoice.status === InvoiceStatus.PAID) {
+          throw new BadRequestException('Cannot cancel an invoice marked as PAID');
+        }
+
+        // 3. Inspect all payment records and financial operations
+        const completedPayments = lockedInvoice.payments?.filter(
+          (p: any) => p.status === PaymentStatus.COMPLETED,
+        ) ?? [];
+        if (completedPayments.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: completed payment records exist');
+        }
+
+        const pendingPayments = lockedInvoice.payments?.filter(
+          (p: any) => p.status === PaymentStatus.PENDING,
+        ) ?? [];
+        if (pendingPayments.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: pending payment operations or claims exist');
+        }
+
+        const activeIntents = lockedInvoice.paymentOrderIntents?.filter(
+          (poi: any) =>
+            poi.status === OrderIntentStatus.CREATED ||
+            poi.status === OrderIntentStatus.CREATING ||
+            poi.activeClaimKey !== null,
+        ) ?? [];
+        if (activeIntents.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: active payment intent in progress');
+        }
+
+        const pendingRefunds = lockedInvoice.paymentRefunds?.filter(
+          (r: any) => r.status === RefundStatus.PENDING,
+        ) ?? [];
+        if (pendingRefunds.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: pending refund operations exist');
+        }
+
+        const activeCases = lockedInvoice.collectionCases?.filter(
+          (c: any) => c.status === CaseStatus.OPEN || c.status === CaseStatus.IN_PROGRESS,
+        ) ?? [];
+        if (activeCases.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: active collection case in progress');
+        }
+
+        const pendingPromises = lockedInvoice.paymentPromises?.filter(
+          (pp: any) => pp.status === PromiseStatus.PENDING,
+        ) ?? [];
+        if (pendingPromises.length > 0) {
+          throw new BadRequestException('Cannot cancel invoice: pending payment promise exists');
+        }
+
+        // 4. Update status to CANCELLED (preserve historical amount and outstanding)
+        const updatedInvoice = await tx.invoice.update({
+          where: { id },
+          data: {
+            status: InvoiceStatus.CANCELLED,
+            ...(dto.description !== undefined ? { description: dto.description } : {}),
+            ...(dto.dueDate ? { dueDate: new Date(dto.dueDate) } : {}),
+          },
+        });
+
+        // 5. Recalculate customer's outstanding balance from active receivable invoices only
+        const unpaidInvoices = await tx.invoice.findMany({
+          where: {
+            customerId: lockedInvoice.customerId,
+            tenantId: user.tenantId,
+            status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+          },
+          select: { outstanding: true },
+        });
+
+        const totalOutstanding = unpaidInvoices.reduce(
+          (sum: number, inv: any) => sum + Number(inv.outstanding),
+          0,
+        );
+
+        await tx.customer.update({
+          where: { id: lockedInvoice.customerId },
+          data: { outstandingBalance: totalOutstanding },
+        });
+
+        // 6. Record audit log entry within transaction flow
+        if (this.auditLogs) {
+          await this.auditLogs.log({
+            tenantId: user.tenantId,
+            userId: user.userId,
+            action: 'invoice.cancelled',
+            entityType: 'Invoice',
+            entityId: id,
+            metadata: {
+              number: lockedInvoice.number,
+              customerId: lockedInvoice.customerId,
+              previousStatus: lockedInvoice.status,
+              newStatus: InvoiceStatus.CANCELLED,
+              amount: Number(lockedInvoice.amount),
+              outstanding: Number(lockedInvoice.outstanding),
+              recalculatedCustomerBalance: totalOutstanding,
+              actor: user.userId,
+              timestamp: new Date().toISOString(),
+            },
+          });
+        }
+
+        return updatedInvoice;
+      });
+    }
+
+    // ── Ordinary Invoice Updates (description, dueDate, status) ───────────
+    const updateData: any = {};
+    if (dto.description !== undefined) {
+      updateData.description = dto.description;
+    }
+    if (dto.dueDate) {
+      const parsedDue = new Date(dto.dueDate);
+      if (isNaN(parsedDue.getTime())) {
+        throw new BadRequestException('Invalid due date format');
+      }
+      updateData.dueDate = parsedDue;
+    }
+    if (dto.status && dto.status !== existing.status) {
+      if (dto.status === InvoiceStatus.OPEN || dto.status === InvoiceStatus.OVERDUE) {
+        updateData.status = dto.status;
+      } else {
+        throw new BadRequestException(`Invalid status transition from ${existing.status} to ${dto.status}`);
+      }
+    }
+
+    const updated = await this.prisma.invoice.update({
       where: { id },
-      data: {
-        ...dto,
-        ...(dto.dueDate ? { dueDate: new Date(dto.dueDate) } : {}),
-      },
+      data: updateData,
     });
+
+    if (this.auditLogs) {
+      await this.auditLogs.log({
+        tenantId: user.tenantId,
+        userId: user.userId,
+        action: 'invoice.updated',
+        entityType: 'Invoice',
+        entityId: id,
+        metadata: {
+          number: existing.number,
+          customerId: existing.customerId,
+          previousStatus: existing.status,
+          newStatus: updated.status,
+          changes: Object.keys(updateData),
+          actor: user.userId,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    }
+
+    return updated;
   }
 
   // ── Dashboard helpers ──────────────────────────────────────────────────────

@@ -21,6 +21,8 @@ import {
   PaymentsService,
   PaymentQueryDto,
   CreatePaymentLinkDto,
+  CreateRazorpayOrderDto,
+  VerifyRazorpayPaymentDto,
   RecordPaymentDto,
   RecordPaymentClaimDto,
 } from './payments.service.js';
@@ -79,6 +81,23 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Generate a payment link for an invoice via Razorpay or Stripe' })
   createPaymentLink(@CurrentUser() user: AuthUser, @Body() dto: CreatePaymentLinkDto) {
     return this.paymentsService.createPaymentLink(user, dto);
+  }
+
+  @Post('razorpay/order')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Create a Razorpay Standard Checkout order for an open invoice' })
+  createRazorpayOrder(@CurrentUser() user: AuthUser, @Body() dto: CreateRazorpayOrderDto) {
+    return this.paymentsService.createRazorpayOrder(user, dto);
+  }
+
+  @Post('razorpay/verify')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Verify Razorpay Checkout payment signature and reconcile invoice atomically' })
+  verifyRazorpayPayment(@CurrentUser() user: AuthUser, @Body() dto: VerifyRazorpayPaymentDto) {
+    return this.paymentsService.verifyRazorpayPayment(user, dto);
   }
 
   @Post('webhook/:provider')

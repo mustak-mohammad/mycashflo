@@ -283,7 +283,13 @@ export class ChotuService {
         const fullCust = await this.prisma.customer.findUnique({
           where: { id: c.id },
           include: {
-            invoices: { where: { outstanding: { gt: 0 } }, orderBy: { dueDate: 'asc' } },
+            invoices: {
+              where: {
+                outstanding: { gt: 0 },
+                status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+              },
+              orderBy: { dueDate: 'asc' },
+            },
             payments: { orderBy: { createdAt: 'desc' }, take: 5 },
           },
         });
@@ -326,11 +332,23 @@ export class ChotuService {
     const now = new Date();
     const balance = Number(customer.outstandingBalance || 0);
     const invoices = customer.invoices || (await this.prisma.invoice.findMany({
-      where: { customerId: customer.id, tenantId: user.tenantId },
+      where: {
+        customerId: customer.id,
+        tenantId: user.tenantId,
+        status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+        outstanding: { gt: 0 },
+      },
       orderBy: { dueDate: 'asc' },
     }));
 
-    const overdueInvoices = invoices.filter((i: any) => Number(i.outstanding) > 0 && new Date(i.dueDate) < now);
+    const overdueInvoices = invoices.filter(
+      (i: any) =>
+        i.status !== InvoiceStatus.CANCELLED &&
+        i.status !== InvoiceStatus.PAID &&
+        i.status !== InvoiceStatus.DRAFT &&
+        Number(i.outstanding) > 0 &&
+        (i.status === InvoiceStatus.OVERDUE || new Date(i.dueDate) < now),
+    );
     const totalOverdue = overdueInvoices.reduce((sum: number, i: any) => sum + Number(i.outstanding), 0);
 
     const payments = customer.payments || (await this.prisma.payment.findMany({
@@ -437,8 +455,9 @@ export class ChotuService {
     const now = new Date();
     const where: any = {
       tenantId: user.tenantId,
+      status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
       outstanding: { gt: 0 },
-      dueDate: { lt: now },
+      OR: [{ status: InvoiceStatus.OVERDUE }, { dueDate: { lt: now } }],
     };
 
     if (agentCustomerIds) {
@@ -503,7 +522,11 @@ export class ChotuService {
     conversationId: string,
   ): Promise<ChotuChatResponseDto> {
     const now = new Date();
-    const where: any = { tenantId: user.tenantId, outstanding: { gt: 0 } };
+    const where: any = {
+      tenantId: user.tenantId,
+      status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+      outstanding: { gt: 0 },
+    };
 
     if (agentCustomerIds) {
       where.customerId = { in: agentCustomerIds };
@@ -515,7 +538,9 @@ export class ChotuService {
     });
 
     const totalReceivables = openInvoices.reduce((acc, i) => acc + Number(i.outstanding), 0);
-    const overdueInvoices = openInvoices.filter((i) => new Date(i.dueDate) < now);
+    const overdueInvoices = openInvoices.filter(
+      (i) => i.status === InvoiceStatus.OVERDUE || new Date(i.dueDate) < now,
+    );
     const overdueAmount = overdueInvoices.reduce((acc, i) => acc + Number(i.outstanding), 0);
     const scopeLabel = user.role === 'AGENT' ? 'Your Assigned Accounts' : 'Entire Organization';
 

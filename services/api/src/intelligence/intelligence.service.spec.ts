@@ -4,7 +4,8 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { ProposalStatus, ActionRisk } from '@prisma/client';
+import { ProposalStatus, ActionRisk, InvoiceStatus } from '@prisma/client';
+import { BadRequestException } from '@nestjs/common';
 
 describe('IntelligenceService', () => {
   let service: IntelligenceService;
@@ -482,6 +483,68 @@ describe('IntelligenceService', () => {
       expect(response.toolCalled).toBe('customize_dashboard');
       expect(response.reply).toContain('Updated dashboard preferences');
       expect(mockPrisma.customer.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Cancelled Invoice Exclusion and Safety Guards', () => {
+    it('queries active receivable statuses when fetching overdue invoices', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_1', name: 'Raj Enterprises' });
+      mockPrisma.invoice.findMany.mockResolvedValue([]);
+
+      const result = await (service as any).toolGetOverdueInvoices('tenant_1', 'cust_1');
+
+      expect(mockPrisma.invoice.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: { in: [InvoiceStatus.OPEN, InvoiceStatus.OVERDUE, InvoiceStatus.PARTIALLY_PAID] },
+            outstanding: { gt: 0 },
+          }),
+        }),
+      );
+      expect(result.invoices).toEqual([]);
+    });
+
+    it('rejects recording Promise-to-Pay for a CANCELLED invoice', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_1', name: 'Raj Enterprises' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_canc',
+        number: 'INV-CANCELLED-001',
+        status: InvoiceStatus.CANCELLED,
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'record_payment_promise',
+          parameters: {
+            customerId: 'cust_1',
+            invoiceId: 'inv_canc',
+            promisedAmount: 5000,
+            promisedDate: '2026-12-01',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects disputing a CANCELLED invoice', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_1', name: 'Raj Enterprises' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_canc',
+        number: 'INV-CANCELLED-001',
+        status: InvoiceStatus.CANCELLED,
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'dispute_invoice',
+          parameters: {
+            customerId: 'cust_1',
+            invoiceId: 'inv_canc',
+            reason: 'Billing calculation dispute',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 });

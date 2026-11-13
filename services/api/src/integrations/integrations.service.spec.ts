@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as crypto from 'crypto';
 import { IntegrationsService } from './integrations.service.js';
 import { RazorpayAdapter } from './adapters/razorpay.adapter.js';
@@ -28,7 +28,10 @@ describe('Phase 7 Integrations Unit Tests', () => {
     role: 'ADMIN',
   };
 
+  const originalEncKey = process.env.INTEGRATION_ENCRYPTION_KEY;
+
   beforeEach(() => {
+    process.env.INTEGRATION_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
     mockPrisma = {
       integrationConfig: {
         findMany: vi.fn(),
@@ -58,6 +61,14 @@ describe('Phase 7 Integrations Unit Tests', () => {
       email,
       sms,
     );
+  });
+
+  afterEach(() => {
+    if (originalEncKey !== undefined) {
+      process.env.INTEGRATION_ENCRYPTION_KEY = originalEncKey;
+    } else {
+      delete process.env.INTEGRATION_ENCRYPTION_KEY;
+    }
   });
 
   describe('RazorpayAdapter', () => {
@@ -426,6 +437,45 @@ describe('Phase 7 Integrations Unit Tests', () => {
       expect(call.raw?.policy).toBe('OUTBOUND_CALLS_DISABLED_BY_DEFAULT');
       expect(call.raw?.roomName).toMatch(/^mcf-cust_001-/);
       expect(call.callSid).toMatch(/^CA_sim_/);
+    });
+  });
+
+  describe('Razorpay IntegrationConfig Security & Connectivity Guards', () => {
+    it('rejects saving live Razorpay keys (rzp_live_*) outside production', async () => {
+      await expect(
+        integrationsService.saveConfig(mockUser, 'RAZORPAY', {
+          config: {
+            keyId: 'rzp_live_1234567890abcdef',
+            keySecret: 'secret_live_12345678',
+          },
+        }),
+      ).rejects.toThrow('Live Razorpay credentials (rzp_live_*) cannot be saved outside production');
+      expect(mockPrisma.integrationConfig.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects saving placeholder Razorpay credentials', async () => {
+      await expect(
+        integrationsService.saveConfig(mockUser, 'RAZORPAY', {
+          config: {
+            keyId: 'rzp_test_placeholder_key_id',
+            keySecret: 'placeholder_razorpay_key_secret',
+          },
+        }),
+      ).rejects.toThrow('placeholder');
+    });
+
+    it('returns FAILED status instead of SUCCESS when testing missing Razorpay credentials', async () => {
+      delete process.env.PAYMENT_SIMULATION_MODE;
+      delete process.env.RAZORPAY_KEY_ID;
+      delete process.env.RAZORPAY_KEY_SECRET;
+      mockPrisma.integrationConfig.findUnique.mockResolvedValue({
+        provider: 'RAZORPAY',
+        config: {},
+      });
+
+      const res = await integrationsService.testConnection(mockUser, 'RAZORPAY');
+      expect(res.status).toBe('FAILED');
+      expect(res.message).toContain('Razorpay connectivity error');
     });
   });
 });

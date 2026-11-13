@@ -1,10 +1,16 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { PageHeader } from '../components/ui/PageHeader'
+import { ConfirmDialog } from '../components/ui/ConfirmDialog'
+import { RazorpayCheckoutModal, isInvoicePayable } from '../components/payments/RazorpayCheckoutModal'
 import { useApi } from '../hooks/useApi'
 import { invoicesApi } from '../api/invoices'
 import { paymentsApi } from '../api/payments'
 import { customersApi } from '../api/customers'
-import type { Invoice, PaymentLinkResponse, Customer } from '../types'
+import { voiceApi } from '../api/voice'
+import { useAuth } from '../store/AuthContext'
+import { useToast } from '../store/ToastContext'
+import { extractSafeApiError, extractSafeErrorMessage } from '../utils/safeError'
+import type { Invoice, PaymentLinkResponse, Customer, DocumentDeliveryRequest } from '../types'
 
 const STATUS_COLORS: Record<string, { bg: string; color: string; label: string }> = {
   DRAFT:          { bg: 'rgba(148,163,184,0.12)', color: 'var(--text-muted)', label: 'Draft' },
@@ -44,11 +50,20 @@ function Skeleton() {
 }
 
 export default function InvoicesPage() {
+  const { user } = useAuth()
+  const toast = useToast()
+  const canManageInvoices = user?.role === 'ADMIN' || user?.role === 'MANAGER'
   const [statusFilter, setStatusFilter] = useState('')
   const [page, setPage] = useState(1)
   const [refreshKey, setRefreshKey] = useState(0)
   const [exporting, setExporting] = useState(false)
   const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [customersLoadError, setCustomersLoadError] = useState<string | null>(null)
+  const [cancelTarget, setCancelTarget] = useState<Invoice | null>(null)
+  const [cancellingInvoice, setCancellingInvoice] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const cancelInFlightRef = useRef(false)
   const limit = 20
 
   // Create Invoice Modal State
@@ -63,6 +78,10 @@ export default function InvoicesPage() {
   const [invSubmitting, setInvSubmitting] = useState(false)
   const [invError, setInvError] = useState<string | null>(null)
 
+  // Razorpay Checkout & Invoice Details state
+  const [checkoutTargetInvoice, setCheckoutTargetInvoice] = useState<Invoice | null>(null)
+  const [detailTargetInvoice, setDetailTargetInvoice] = useState<Invoice | null>(null)
+
   // Payment Link Modal state
   const [activeInvoice, setActiveInvoice] = useState<Invoice | null>(null)
   const [selectedProvider, setSelectedProvider] = useState<'RAZORPAY' | 'STRIPE'>('RAZORPAY')
@@ -70,6 +89,27 @@ export default function InvoicesPage() {
   const [generatedLink, setGeneratedLink] = useState<PaymentLinkResponse | null>(null)
   const [copied, setCopied] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Document Delivery History Modal state
+  const [activeDeliveryHistoryInvoice, setActiveDeliveryHistoryInvoice] = useState<Invoice | null>(null)
+  const [deliveryRequests, setDeliveryRequests] = useState<DocumentDeliveryRequest[]>([])
+  const [loadingDeliveries, setLoadingDeliveries] = useState(false)
+  const [deliveryHistoryError, setDeliveryHistoryError] = useState<string | null>(null)
+  const [copiedHistoryLinkId, setCopiedHistoryLinkId] = useState<string | null>(null)
+
+  const handleOpenDeliveryHistory = async (inv: Invoice) => {
+    setActiveDeliveryHistoryInvoice(inv)
+    setLoadingDeliveries(true)
+    setDeliveryHistoryError(null)
+    try {
+      const res = await voiceApi.getDocumentDeliveryRequests({ invoiceId: inv.id })
+      setDeliveryRequests(res.data || [])
+    } catch (err: any) {
+      setDeliveryHistoryError(err?.message || 'Failed to load delivery history')
+    } finally {
+      setLoadingDeliveries(false)
+    }
+  }
 
   const fetcher = useCallback(
     () => invoicesApi.list({ page, limit, status: statusFilter || undefined }),
@@ -79,13 +119,20 @@ export default function InvoicesPage() {
   const { data, loading, error } = useApi(fetcher)
 
   useEffect(() => {
-    customersApi.list({ limit: 100 }).then((res) => {
-      setCustomersList(res.data)
-      if (res.data.length > 0 && !invCustomerId) {
-        setInvCustomerId(res.data[0].id)
-      }
-    }).catch(console.error)
-  }, [])
+    if (!canManageInvoices) return
+    customersApi
+      .list({ limit: 100 })
+      .then((res) => {
+        setCustomersList(res.data)
+        setCustomersLoadError(null)
+        if (res.data.length > 0 && !invCustomerId) {
+          setInvCustomerId(res.data[0].id)
+        }
+      })
+      .catch((err) => {
+        setCustomersLoadError(extractSafeErrorMessage(err, 'Failed to load customers for invoice creation.'))
+      })
+  }, [canManageInvoices])
 
   const totalPages = data ? Math.ceil(data.total / limit) : 1
 
@@ -111,13 +158,16 @@ export default function InvoicesPage() {
         dueDate: invDueDate,
         description: invDescription.trim() || undefined,
       })
+      toast.success(`Invoice ${invNumber.trim().toUpperCase()} created.`)
       setIsCreateOpen(false)
       setInvNumber('')
       setInvAmount('')
       setInvDescription('')
       setRefreshKey((k) => k + 1)
-    } catch (err: any) {
-      setInvError(err.message || 'Failed to create invoice.')
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to create invoice.')
+      setInvError(msg)
+      toast.error(msg)
     } finally {
       setInvSubmitting(false)
     }
@@ -125,10 +175,14 @@ export default function InvoicesPage() {
 
   const handleExport = async () => {
     setExporting(true)
+    setActionError(null)
     try {
       await invoicesApi.downloadCsv({ status: statusFilter || undefined })
-    } catch (e: any) {
-      alert(`Export failed: ${e?.message ?? 'unknown error'}`)
+      toast.success('Invoices CSV exported.')
+    } catch (e: unknown) {
+      const msg = await extractSafeApiError(e, 'Failed to export invoices CSV.')
+      setActionError(msg)
+      toast.error(msg)
     } finally {
       setExporting(false)
     }
@@ -136,12 +190,35 @@ export default function InvoicesPage() {
 
   const handleRowDownload = async (inv: Invoice) => {
     setDownloadingId(inv.id)
+    setActionError(null)
     try {
       await invoicesApi.downloadPdf(inv.id, inv.number)
-    } catch (e: any) {
-      alert(`Failed to download invoice PDF: ${e?.message ?? 'unknown error'}`)
+    } catch (e: unknown) {
+      const msg = await extractSafeApiError(e, `Failed to download invoice ${inv.number} PDF.`)
+      setActionError(msg)
+      toast.error(msg)
     } finally {
       setDownloadingId(null)
+    }
+  }
+
+  const handleConfirmCancelInvoice = async () => {
+    if (!cancelTarget || cancelInFlightRef.current) return
+    cancelInFlightRef.current = true
+    setCancellingInvoice(true)
+    setCancelError(null)
+    try {
+      await invoicesApi.update(cancelTarget.id, { status: 'CANCELLED' })
+      toast.success(`Invoice ${cancelTarget.number} cancelled.`)
+      setCancelTarget(null)
+      setRefreshKey((k) => k + 1)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, `Failed to cancel invoice ${cancelTarget.number}.`)
+      setCancelError(msg)
+      toast.error(msg)
+    } finally {
+      setCancellingInvoice(false)
+      cancelInFlightRef.current = false
     }
   }
 
@@ -184,15 +261,17 @@ export default function InvoicesPage() {
         subtitle={`${data?.total ?? '…'} total invoices`}
         action={
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                setInvError(null)
-                setIsCreateOpen(true)
-              }}
-              className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer"
-            >
-              + Create Invoice
-            </button>
+            {canManageInvoices && (
+              <button
+                onClick={() => {
+                  setInvError(null)
+                  setIsCreateOpen(true)
+                }}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer"
+              >
+                + Create Invoice
+              </button>
+            )}
             <button
               onClick={handleExport}
               disabled={exporting}
@@ -230,8 +309,19 @@ export default function InvoicesPage() {
           {loading && <span className="text-xs ml-2" style={{ color: 'var(--text-muted)' }}>Loading…</span>}
         </div>
 
-        {error && (
-          <div className="px-5 py-3 text-sm" style={{ color: 'var(--danger)' }}>⚠️ {error}</div>
+        {(error || actionError) && (
+          <div role="alert" className="px-5 py-3 text-sm flex items-center justify-between gap-3" style={{ color: 'var(--danger)' }}>
+            <span>⚠️ {actionError || error}</span>
+            {actionError && (
+              <button
+                type="button"
+                onClick={() => setActionError(null)}
+                className="text-xs underline cursor-pointer bg-transparent border-none text-current"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
         )}
 
         <div className="overflow-x-auto">
@@ -258,7 +348,16 @@ export default function InvoicesPage() {
                   const hasOutstanding = Number(inv.outstanding) > 0 && inv.status !== 'CANCELLED'
                   return (
                     <tr key={inv.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                      <td className="px-5 py-3.5 font-mono text-white text-xs">{inv.number}</td>
+                      <td className="px-5 py-3.5 font-mono text-white text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setDetailTargetInvoice(inv)}
+                          title={`View details for invoice ${inv.number}`}
+                          className="hover:underline text-indigo-300 font-semibold cursor-pointer text-left font-mono bg-transparent border-none p-0"
+                        >
+                          {inv.number}
+                        </button>
+                      </td>
                       <td className="px-5 py-3.5 text-white font-medium">{inv.customer?.name ?? '—'}</td>
                       <td className="px-5 py-3.5 text-white">{fmt(Number(inv.amount))}</td>
                       <td className="px-5 py-3.5 font-semibold" style={{ color: Number(inv.outstanding) > 0 ? 'var(--danger)' : 'var(--text-muted)' }}>
@@ -266,9 +365,24 @@ export default function InvoicesPage() {
                       </td>
                       <td className="px-5 py-3.5" style={{ color: 'var(--text-muted)' }}>{formatDate(inv.dueDate)}</td>
                       <td className="px-5 py-3.5">
-                        <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: st.bg, color: st.color }}>
-                          {st.label}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className="px-2 py-0.5 rounded-full text-xs font-medium w-fit" style={{ background: st.bg, color: st.color }}>
+                            {st.label}
+                          </span>
+                          {inv.status === 'PAID' ? (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-emerald-950/70 text-emerald-400 border border-emerald-800/60 w-fit">
+                              ✓ Paid in Full
+                            </span>
+                          ) : inv.status === 'CANCELLED' ? (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 w-fit">
+                              Disabled
+                            </span>
+                          ) : hasOutstanding ? (
+                            <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-indigo-950/70 text-indigo-300 border border-indigo-800/60 w-fit">
+                              Link Ready
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-2">
@@ -288,14 +402,78 @@ export default function InvoicesPage() {
                             {downloadingId === inv.id ? '…' : 'PDF'}
                           </button>
 
-                          {hasOutstanding && (
+                          {isInvoicePayable(inv) ? (
+                            <button
+                              type="button"
+                              data-testid={`pay-now-btn-${inv.id}`}
+                              onClick={() => setCheckoutTargetInvoice(inv)}
+                              title="Pay invoice now via Razorpay Standard Checkout (Test Mode)"
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 bg-emerald-900/40 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 cursor-pointer transition-colors shadow-sm"
+                            >
+                              <span>⚡</span>
+                              <span>Pay Now</span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled
+                              data-testid={`pay-now-btn-${inv.id}`}
+                              title={
+                                inv.status === 'PAID'
+                                  ? 'Invoice is already paid in full'
+                                  : inv.status === 'CANCELLED'
+                                  ? 'Cannot pay cancelled invoice'
+                                  : inv.status === 'DRAFT'
+                                  ? 'Cannot pay draft invoice'
+                                  : 'No outstanding balance'
+                              }
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 bg-slate-800/50 text-slate-500 border border-slate-700/50 cursor-not-allowed opacity-50"
+                            >
+                              <span>⚡</span>
+                              <span>Pay Now</span>
+                            </button>
+                          )}
+
+                          {inv.status === 'PAID' || inv.status === 'CANCELLED' ? (
+                            <button
+                              disabled
+                              title={inv.status === 'PAID' ? 'Invoice is already paid in full' : 'Cannot generate payment link for cancelled invoice'}
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 bg-slate-800/50 text-slate-500 border border-slate-700/50 cursor-not-allowed opacity-50"
+                            >
+                              <span>💳</span>
+                              <span>Pay Link</span>
+                            </button>
+                          ) : (
                             <button
                               onClick={() => handleOpenPayModal(inv)}
-                              title="Generate payment link (Razorpay / Stripe)"
+                              title="Generate or retrieve payment link (Razorpay / Stripe)"
                               className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-700/50 cursor-pointer transition-colors"
                             >
                               <span>💳</span>
                               <span>Pay Link</span>
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => handleOpenDeliveryHistory(inv)}
+                            title="View customer invoice & payment-link delivery history"
+                            className="px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer transition-colors"
+                          >
+                            <span>📬</span>
+                            <span>Deliveries</span>
+                          </button>
+
+                          {canManageInvoices && inv.status !== 'PAID' && inv.status !== 'CANCELLED' && (
+                            <button
+                              type="button"
+                              aria-label={`Cancel invoice ${inv.number}`}
+                              onClick={() => {
+                                setCancelError(null)
+                                setCancelTarget(inv)
+                              }}
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 cursor-pointer transition-colors"
+                            >
+                              Cancel
                             </button>
                           )}
                         </div>
@@ -477,8 +655,155 @@ export default function InvoicesPage() {
         </div>
       )}
 
+      {/* Document Delivery History Modal */}
+      {activeDeliveryHistoryInvoice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/80">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>📬</span> Document Delivery History
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Invoice <strong className="text-white font-mono">{activeDeliveryHistoryInvoice.number}</strong> • Customer: <strong className="text-white">{activeDeliveryHistoryInvoice.customer?.name ?? '—'}</strong>
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
+                  <span>🧪</span> Simulation Mode (No real messages sent)
+                </span>
+                <button
+                  onClick={() => setActiveDeliveryHistoryInvoice(null)}
+                  className="text-slate-400 hover:text-white text-lg p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4 overflow-y-auto text-xs text-slate-300">
+              {deliveryHistoryError && (
+                <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-800 text-rose-300">
+                  ⚠️ {deliveryHistoryError}
+                </div>
+              )}
+
+              {loadingDeliveries ? (
+                <div className="py-12 text-center text-slate-400 flex flex-col items-center gap-2">
+                  <div className="animate-spin text-2xl">⏳</div>
+                  <div>Loading delivery records from backend…</div>
+                </div>
+              ) : deliveryRequests.length === 0 ? (
+                <div className="py-10 text-center text-slate-400 bg-slate-950/40 rounded-xl border border-slate-800 p-6">
+                  <div className="text-2xl mb-2">📭</div>
+                  <div className="font-semibold text-slate-300">No document delivery requests found</div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    When a customer requests an invoice or payment link during a Chotu voice session, the delivery record and channel attempts will appear here.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {deliveryRequests.map((req) => (
+                    <div key={req.id} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-950 text-indigo-300 border border-indigo-800">
+                            {req.requestType === 'BOTH' ? 'Invoice & Payment Link' : req.requestType === 'PAYMENT_LINK' ? 'Payment Link' : 'Invoice Copy'}
+                          </span>
+                          <span className="text-slate-400 text-[11px]">
+                            by <span className="text-slate-200 font-mono">{req.requestedBy}</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-400 text-[11px] font-mono">
+                            {formatDate(req.requestedAt)} {new Date(req.requestedAt).toLocaleTimeString()}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            req.status === 'COMPLETED'
+                              ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                              : req.status === 'PARTIAL_SUCCESS'
+                              ? 'bg-amber-950 text-amber-300 border-amber-800'
+                              : req.status === 'FAILED'
+                              ? 'bg-rose-950 text-rose-300 border-rose-800'
+                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                          }`}>
+                            {req.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Delivery attempts */}
+                      {req.attempts && req.attempts.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Channel Attempts:
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {req.attempts.map((att) => (
+                              <div key={att.id} className="p-2 rounded bg-slate-900 border border-slate-800 flex items-center justify-between text-[11px]">
+                                <div className="flex items-center gap-1.5">
+                                  <span>{att.channel === 'WHATSAPP' ? '💬' : '✉️'}</span>
+                                  <span className="font-semibold text-slate-200">{att.channel}</span>
+                                  <span className="text-slate-400 font-mono text-[10px]">({att.destinationMasked})</span>
+                                </div>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                                  att.status === 'SIMULATED'
+                                    ? 'bg-amber-950 text-amber-300 border-amber-800'
+                                    : att.status === 'DELIVERED' || att.status === 'SENT'
+                                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                    : att.status === 'FAILED'
+                                    ? 'bg-rose-950 text-rose-300 border-rose-800'
+                                    : 'bg-slate-800 text-slate-300 border-slate-700'
+                                }`}>
+                                  {att.status === 'SIMULATED' ? '🧪 Sim' : att.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons inside delivery card */}
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
+                        <button
+                          onClick={() => handleRowDownload(activeDeliveryHistoryInvoice)}
+                          className="px-2.5 py-1 rounded text-xs font-semibold bg-indigo-950/70 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 cursor-pointer flex items-center gap-1"
+                        >
+                          <span>📄</span> Download Invoice PDF
+                        </button>
+                        {req.metadata?.paymentLinkUrl && (
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(req.metadata!.paymentLinkUrl!)
+                              setCopiedHistoryLinkId(req.id)
+                              setTimeout(() => setCopiedHistoryLinkId(null), 2000)
+                            }}
+                            className="px-2.5 py-1 rounded text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 cursor-pointer flex items-center gap-1"
+                          >
+                            <span>💳</span> {copiedHistoryLinkId === req.id ? '✓ Link Copied!' : 'Copy Payment Link'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-t border-slate-800 flex justify-end bg-slate-950">
+              <button
+                onClick={() => setActiveDeliveryHistoryInvoice(null)}
+                className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-white cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create Invoice Modal */}
-      {isCreateOpen && (
+      {canManageInvoices && isCreateOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div
             className="w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl flex flex-col"
@@ -495,9 +820,9 @@ export default function InvoicesPage() {
             </div>
 
             <form onSubmit={handleCreateInvoice} className="p-6 space-y-4 text-xs">
-              {invError && (
-                <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300">
-                  ⚠️ {invError}
+              {(invError || customersLoadError) && (
+                <div role="alert" className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300">
+                  ⚠️ {invError || customersLoadError}
                 </div>
               )}
 
@@ -599,6 +924,182 @@ export default function InvoicesPage() {
           </div>
         </div>
       )}
+
+      {/* Invoice Details Modal */}
+      {detailTargetInvoice && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="invoice-details-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm"
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl p-6 shadow-2xl space-y-5"
+            style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+          >
+            <div className="flex items-start justify-between pb-3 border-b border-white/10">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 id="invoice-details-title" className="text-base font-bold text-white tracking-tight">
+                    Invoice {detailTargetInvoice.number}
+                  </h3>
+                  <span
+                    className="px-2 py-0.5 rounded-full text-xs font-medium"
+                    style={{
+                      background: (STATUS_COLORS[detailTargetInvoice.status] ?? STATUS_COLORS.DRAFT).bg,
+                      color: (STATUS_COLORS[detailTargetInvoice.status] ?? STATUS_COLORS.DRAFT).color,
+                    }}
+                  >
+                    {(STATUS_COLORS[detailTargetInvoice.status] ?? STATUS_COLORS.DRAFT).label}
+                  </span>
+                </div>
+                <p className="text-xs text-white/50 mt-0.5">
+                  Issued to <strong>{detailTargetInvoice.customer?.name ?? 'Customer'}</strong>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailTargetInvoice(null)}
+                aria-label="Close invoice details"
+                className="text-white/40 hover:text-white text-lg p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 rounded-xl space-y-2 bg-white/[0.02] border border-white/5 text-xs">
+              <div className="flex justify-between text-white/70">
+                <span>Issue Date:</span>
+                <span className="text-white">{formatDate(detailTargetInvoice.issueDate)}</span>
+              </div>
+              <div className="flex justify-between text-white/70">
+                <span>Due Date:</span>
+                <span className="text-white">{formatDate(detailTargetInvoice.dueDate)}</span>
+              </div>
+              <div className="flex justify-between text-white/70">
+                <span>Total Amount:</span>
+                <span className="font-mono text-white">{fmt(Number(detailTargetInvoice.amount))}</span>
+              </div>
+              <div className="flex justify-between text-white/70">
+                <span>Amount Paid:</span>
+                <span className="font-mono text-emerald-400">
+                  {fmt(Math.max(0, Number(detailTargetInvoice.amount) - Number(detailTargetInvoice.outstanding)))}
+                </span>
+              </div>
+              <div className="flex justify-between text-white/70">
+                <span>Remaining Outstanding:</span>
+                <span
+                  className="font-mono font-bold"
+                  style={{
+                    color: Number(detailTargetInvoice.outstanding) > 0 ? 'var(--danger)' : 'var(--text-muted)',
+                  }}
+                >
+                  {fmt(Number(detailTargetInvoice.outstanding))}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRowDownload(detailTargetInvoice)}
+                  disabled={downloadingId === detailTargetInvoice.id}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 bg-white/5 hover:bg-white/10 border border-white/10 text-white cursor-pointer"
+                >
+                  <span>📄</span>
+                  <span>PDF</span>
+                </button>
+                {detailTargetInvoice.status !== 'PAID' && detailTargetInvoice.status !== 'CANCELLED' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = detailTargetInvoice
+                      setDetailTargetInvoice(null)
+                      handleOpenPayModal(target)
+                    }}
+                    className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-700/50 cursor-pointer"
+                  >
+                    <span>💳</span>
+                    <span>Pay Link</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDetailTargetInvoice(null)}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white/70 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer"
+                >
+                  Close
+                </button>
+                {isInvoicePayable(detailTargetInvoice) && (
+                  <button
+                    type="button"
+                    data-testid="detail-pay-now-btn"
+                    onClick={() => {
+                      const target = detailTargetInvoice
+                      setDetailTargetInvoice(null)
+                      setCheckoutTargetInvoice(target)
+                    }}
+                    className="px-4 py-1.5 rounded-xl text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 cursor-pointer shadow-lg shadow-emerald-600/30 flex items-center gap-1.5"
+                  >
+                    <span>⚡</span>
+                    <span>Pay Now</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Razorpay Standard Checkout Modal (Test Mode) */}
+      {checkoutTargetInvoice && (
+        <RazorpayCheckoutModal
+          invoice={checkoutTargetInvoice}
+          isOpen={Boolean(checkoutTargetInvoice)}
+          onClose={() => setCheckoutTargetInvoice(null)}
+          onPaymentSuccess={(result) => {
+            setRefreshKey((k) => k + 1)
+            if (detailTargetInvoice && checkoutTargetInvoice && detailTargetInvoice.id === checkoutTargetInvoice.id) {
+              setDetailTargetInvoice((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      status: (result.invoiceStatus as any) || prev.status,
+                      outstanding:
+                        typeof result.remainingOutstanding === 'number'
+                          ? result.remainingOutstanding
+                          : prev.outstanding,
+                    }
+                  : null,
+              )
+            }
+          }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={Boolean(cancelTarget)}
+        title="Cancel Invoice"
+        description={
+          cancelTarget
+            ? `Are you sure you want to cancel invoice ${cancelTarget.number}? Cancelled invoices cannot receive payment links.`
+            : ''
+        }
+        confirmLabel="Confirm Cancel"
+        cancelLabel="Keep Invoice"
+        variant="danger"
+        loading={cancellingInvoice}
+        errorMessage={cancelError}
+        onCancel={() => {
+          setCancelTarget(null)
+          setCancelError(null)
+        }}
+        onConfirm={handleConfirmCancelInvoice}
+      />
     </div>
   )
 }

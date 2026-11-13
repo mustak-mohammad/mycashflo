@@ -1,5 +1,14 @@
 import apiClient from './client'
-import type { Paginated, Payment, PaymentStats, PaymentLinkResponse } from '../types'
+import type {
+  Paginated,
+  Payment,
+  PaymentStats,
+  PaymentLinkResponse,
+  CreateRazorpayOrderDto,
+  RazorpayOrderResponse,
+  VerifyRazorpayPaymentDto,
+  VerifyRazorpayPaymentResponse,
+} from '../types'
 
 export const paymentsApi = {
   list: (params?: { page?: number; limit?: number; status?: string; method?: string }) =>
@@ -10,6 +19,12 @@ export const paymentsApi = {
 
   createPaymentLink: (data: { invoiceId: string; provider?: 'RAZORPAY' | 'STRIPE'; description?: string }) =>
     apiClient.post<PaymentLinkResponse>('/payments/link', data).then((r) => r.data),
+
+  createRazorpayOrder: (data: CreateRazorpayOrderDto) =>
+    apiClient.post<RazorpayOrderResponse>('/payments/razorpay/order', data).then((r) => r.data),
+
+  verifyRazorpayPayment: (data: VerifyRazorpayPaymentDto) =>
+    apiClient.post<VerifyRazorpayPaymentResponse>('/payments/razorpay/verify', data).then((r) => r.data),
 
   recordPayment: (data: {
     invoiceId: string

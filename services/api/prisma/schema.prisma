@@ -31,6 +31,10 @@ model Tenant {
   auditLogs        AuditLog[]
   actionProposals  ActionProposal[]
   voicePrompts     VoicePrompt[]
+  documentDeliveryRequests DocumentDeliveryRequest[]
+  deliveryAttempts         DeliveryAttempt[]
+  paymentRefunds           PaymentRefund[]
+  paymentOrderIntents      PaymentOrderIntent[]
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -40,9 +44,10 @@ model User {
   passwordHash String
   name         String
   role         UserRole @default(AGENT)
-  isActive     Boolean  @default(true)
-  tenantId     String
-  createdAt    DateTime @default(now())
+  isActive          Boolean   @default(true)
+  tenantId          String
+  tokensValidAfter  DateTime?
+  createdAt         DateTime  @default(now())
   updatedAt    DateTime @updatedAt
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -98,6 +103,9 @@ model Customer {
   collectionCases CollectionCase[]
   notifications   Notification[]
   callSessions    CallSession[]
+  documentDeliveryRequests DocumentDeliveryRequest[]
+  paymentRefunds           PaymentRefund[]
+  paymentOrderIntents      PaymentOrderIntent[]
 
   @@index([tenantId])
   @@index([tenantId, status])
@@ -129,6 +137,9 @@ model Invoice {
   payments        Payment[]
   collectionCases CollectionCase[]
   paymentPromises PaymentPromise[]
+  documentDeliveryRequests DocumentDeliveryRequest[]
+  paymentRefunds           PaymentRefund[]
+  paymentOrderIntents      PaymentOrderIntent[]
 
   @@unique([number, tenantId])
   @@index([tenantId])
@@ -163,13 +174,88 @@ model Payment {
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer Customer @relation(fields: [customerId], references: [id])
-  invoice  Invoice  @relation(fields: [invoiceId], references: [id])
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer        @relation(fields: [customerId], references: [id])
+  invoice  Invoice         @relation(fields: [invoiceId], references: [id])
+  refunds  PaymentRefund[]
 
   @@index([tenantId])
   @@index([customerId])
   @@index([invoiceId])
+  @@index([providerRef])
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSED
+  FAILED
+}
+
+model PaymentRefund {
+  id                String       @id @default(cuid())
+  tenantId          String
+  paymentId         String
+  invoiceId         String
+  customerId        String
+  provider          String       @default("RAZORPAY")
+  providerRefundId  String       @unique
+  providerPaymentId String
+  amount            Decimal      @db.Decimal(19, 4)
+  currency          String       @default("INR")
+  status            RefundStatus @default(PENDING)
+  reason            String?
+  rawEvent          String?
+  processedAt       DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payment  Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([tenantId])
+  @@index([paymentId])
+  @@index([invoiceId])
+  @@index([providerPaymentId])
+}
+
+enum OrderIntentStatus {
+  CREATING
+  CREATED
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+
+model PaymentOrderIntent {
+  id              String            @id @default(cuid())
+  tenantId        String
+  invoiceId       String
+  customerId      String
+  idempotencyKey  String            @unique
+  activeClaimKey  String?           @unique
+  receipt         String            @unique
+  amount          Decimal           @db.Decimal(19, 4)
+  amountInPaise   Int
+  currency        String            @default("INR")
+  status          OrderIntentStatus @default(CREATING)
+  provider        String            @default("RAZORPAY")
+  providerOrderId String?           @unique
+  paymentId       String?           @unique
+  keyId           String?
+  isSimulated     Boolean           @default(false)
+  errorMessage    String?
+  expiresAt       DateTime
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([tenantId, invoiceId, status])
+  @@index([expiresAt])
 }
 
 enum PaymentMethod {
@@ -280,6 +366,7 @@ model CallSession {
   customer       Customer?       @relation(fields: [customerId], references: [id])
   agent          User            @relation(fields: [userId], references: [id])
   collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
+  documentDeliveryRequests DocumentDeliveryRequest[]
 
   @@index([tenantId])
   @@index([customerId])
@@ -293,6 +380,9 @@ enum CallOutcome {
   CALLBACK_REQUESTED
   RESOLVED
   OTHER
+  WILL_PAY_LATER
+  UNABLE_TO_PAY
+  PAYMENT_CLAIMED
 }
 
 enum RecordingStatus {
@@ -457,4 +547,108 @@ model VoicePrompt {
   @@index([tenantId, category])
   @@index([tenantId, isActive])
 }
+
+// ── Customer Document & Payment Link Delivery ─────────────────────────────────
+enum DocumentRequestType {
+  INVOICE
+  PAYMENT_LINK
+  BOTH
+}
+
+enum DeliveryChannelPreference {
+  WHATSAPP
+  EMAIL
+  WHATSAPP_AND_EMAIL
+}
+
+enum DocumentDeliveryStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  PARTIAL_SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum DeliveryAttemptChannel {
+  WHATSAPP
+  EMAIL
+}
+
+enum DeliveryAttemptStatus {
+  PENDING
+  SIMULATED
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  SKIPPED
+}
+
+model DocumentDeliveryRequest {
+  id              String                    @id @default(cuid())
+  tenantId        String
+  customerId      String
+  invoiceId       String
+  callSessionId   String?
+  requestType     DocumentRequestType       @default(BOTH)
+  deliveryChannel DeliveryChannelPreference @default(WHATSAPP_AND_EMAIL)
+  status          DocumentDeliveryStatus    @default(PENDING)
+  requestedBy     String                    // 'CHOTU_VOICE', 'MANUAL_AGENT', 'CUSTOMER'
+  idempotencyKey  String?                   @unique
+  metadata        Json?                     // Stores payment link URL, token, invoice details, cancellation reasons
+  requestedAt     DateTime                  @default(now())
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+
+  tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer        Customer                  @relation(fields: [customerId], references: [id])
+  invoice         Invoice                   @relation(fields: [invoiceId], references: [id])
+  callSession     CallSession?              @relation(fields: [callSessionId], references: [id])
+  attempts        DeliveryAttempt[]
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([invoiceId])
+  @@index([callSessionId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model DeliveryAttempt {
+  id                String                 @id @default(cuid())
+  tenantId          String
+  requestId         String
+  channel           DeliveryAttemptChannel // WHATSAPP or EMAIL
+  destinationMasked String                 // e.g. "+91 98****3210" or "c****r@domain.com"
+  status            DeliveryAttemptStatus  @default(PENDING)
+  provider          String                 // 'WHATSAPP_CLOUD', 'RESEND', 'SIMULATED'
+  providerMessageId String?
+  errorCode         String?
+  errorMessage      String?
+  sentAt            DateTime?
+  deliveredAt       DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  tenant            Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  request           DocumentDeliveryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([requestId])
+  @@index([status])
+  @@index([channel])
+}
+
+// ── Shared Webhook Replay Protection (Multi-Instance Safe) ────────────────────
+model WebhookReplay {
+  id        String   @id @default(cuid())
+  provider  String
+  replayKey String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
 
