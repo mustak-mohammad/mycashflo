@@ -48,7 +48,7 @@ function Skeleton() {
   )
 }
 
-export default function CallHistoryPage() {
+export function CallHistoryView({ hideHeader }: { hideHeader?: boolean } = {}) {
   const toast = useToast()
   const [outcomeFilter, setOutcomeFilter] = useState<string>('')
   const [page, setPage] = useState(1)
@@ -102,27 +102,40 @@ export default function CallHistoryPage() {
   }
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <PageHeader
-        title="Call History"
-        subtitle={`${total} total AI voice & collection call records`}
-        action={
+    <div className={hideHeader ? 'space-y-4' : 'p-6 max-w-7xl mx-auto'}>
+      {!hideHeader ? (
+        <PageHeader
+          title="Call History"
+          subtitle={`${total} total AI voice & collection call records`}
+          action={
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              className="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+              style={{
+                background: '#059669',
+                color: '#ffffff',
+                border: 'none',
+                cursor: exporting ? 'wait' : 'pointer',
+              }}
+            >
+              <span>📥</span>
+              {exporting ? 'Exporting…' : 'Export CSV'}
+            </button>
+          }
+        />
+      ) : (
+        <div className="flex justify-end">
           <button
             onClick={handleExport}
             disabled={exporting}
-            className="px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5"
-            style={{
-              background: '#059669',
-              color: '#ffffff',
-              border: 'none',
-              cursor: exporting ? 'wait' : 'pointer',
-            }}
+            className="px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-md shadow-emerald-600/30 disabled:opacity-50"
           >
             <span>📥</span>
             {exporting ? 'Exporting…' : 'Export CSV'}
           </button>
-        }
-      />
+        </div>
+      )}
 
       {error && (
         <div
@@ -674,4 +687,8 @@ export default function CallHistoryPage() {
       )}
     </div>
   )
+}
+
+export default function CallHistoryPage() {
+  return <CallHistoryView />
 }

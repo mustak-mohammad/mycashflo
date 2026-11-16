@@ -112,11 +112,11 @@ describe('P2-07: Responsive Web Shell, Toast, ConfirmDialog, ErrorBoundary & Err
       expect(drawerScope.getByText('Dashboard')).toBeInTheDocument()
       expect(drawerScope.getByText('Customers')).toBeInTheDocument()
       expect(drawerScope.getByText('My Profile')).toBeInTheDocument()
-      // Role-restricted items must stay hidden from AGENT
-      expect(drawerScope.queryByText('Intelligence')).not.toBeInTheDocument()
-      expect(drawerScope.queryByText('Reminders')).not.toBeInTheDocument()
-      expect(drawerScope.queryByText('Voice Prompts')).not.toBeInTheDocument()
+      // Role-restricted and consolidated items verification
+      expect(drawerScope.getByText('Reminders & Collections')).toBeInTheDocument()
       expect(drawerScope.queryByText('Settings')).not.toBeInTheDocument()
+      expect(drawerScope.queryByText('Intelligence')).not.toBeInTheDocument()
+      expect(drawerScope.queryByText('Voice Prompts')).not.toBeInTheDocument()
 
       // Pressing Escape closes drawer and returns focus to menu toggle
       await user.keyboard('{Escape}')
@@ -152,10 +152,10 @@ describe('P2-07: Responsive Web Shell, Toast, ConfirmDialog, ErrorBoundary & Err
 
       await user.click(await screen.findByRole('button', { name: /Open navigation menu/i }))
       const drawerScope = within(screen.getByRole('dialog', { name: /Mobile navigation/i }))
-      expect(drawerScope.getByText('Intelligence')).toBeInTheDocument()
-      expect(drawerScope.getByText('Reminders')).toBeInTheDocument()
-      expect(drawerScope.getByText('Voice Prompts')).toBeInTheDocument()
+      expect(drawerScope.getByText('Reminders & Collections')).toBeInTheDocument()
       expect(drawerScope.getByText('Settings')).toBeInTheDocument()
+      expect(drawerScope.queryByText('Intelligence')).not.toBeInTheDocument()
+      expect(drawerScope.queryByText('Voice Prompts')).not.toBeInTheDocument()
       await user.click(drawerScope.getByRole('button', { name: /Close navigation menu/i }))
       expect(screen.queryByRole('dialog', { name: /Mobile navigation/i })).not.toBeInTheDocument()
       unmount()

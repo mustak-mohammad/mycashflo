@@ -4,26 +4,19 @@ import { useAuth } from '../../store/AuthContext'
 import { FloatingChatWidget } from '../chat/FloatingChatWidget'
 import { getDisplayName } from '../../utils/user'
 
-const NAV_ITEMS: Array<{
+export const NAV_ITEMS: Array<{
   to: string
   icon: string
   label: string
   roles?: Array<'SUPER_ADMIN' | 'ADMIN' | 'MANAGER' | 'AGENT'>
 }> = [
-  { to: '/dashboard',     icon: '⊞',  label: 'Dashboard' },
-  { to: '/customers',     icon: '👥', label: 'Customers' },
-  { to: '/invoices',      icon: '🧾', label: 'Invoices' },
-  { to: '/payments',      icon: '💳', label: 'Payments' },
-  { to: '/collections',   icon: '📋', label: 'Collections' },
-  { to: '/intelligence',  icon: '🧠', label: 'Intelligence',  roles: ['ADMIN', 'MANAGER'] },
-  { to: '/voice',         icon: '🤖', label: 'Chotu AI' },
-  { to: '/reminders',     icon: '⏰', label: 'Reminders',     roles: ['ADMIN', 'MANAGER'] },
-  { to: '/voice-prompts', icon: '🎙️', label: 'Voice Prompts', roles: ['ADMIN', 'MANAGER'] },
-  { to: '/calls',         icon: '📞', label: 'Call History' },
-  { to: '/follow-ups',    icon: '✅', label: 'Follow-Ups' },
-  { to: '/reports',       icon: '📊', label: 'Reports' },
-  { to: '/profile',       icon: '👤', label: 'My Profile' },
-  { to: '/settings',      icon: '⚙️', label: 'Settings',      roles: ['ADMIN', 'MANAGER'] },
+  { to: '/dashboard', icon: '⊞',  label: 'Dashboard' },
+  { to: '/customers', icon: '👥', label: 'Customers' },
+  { to: '/invoices',  icon: '🧾', label: 'Invoices' },
+  { to: '/payments',  icon: '💳', label: 'Payments' },
+  { to: '/reminders', icon: '⏰', label: 'Reminders & Collections' },
+  { to: '/reports',   icon: '📊', label: 'Reports' },
+  { to: '/settings',  icon: '⚙️', label: 'Settings', roles: ['ADMIN', 'MANAGER'] },
 ]
 
 function getRoleBadgeStyle(role?: string) {
@@ -127,7 +120,7 @@ export function AppLayout() {
             </div>
             <div className="min-w-0">
               <div className="font-semibold text-sm truncate" style={{ color: 'var(--text)' }}>
-                {currentNav?.label || 'myCashflo'}
+                {currentNav?.label || (location.pathname.startsWith('/profile') ? 'My Profile' : 'myCashflo')}
               </div>
             </div>
           </div>
@@ -242,6 +235,22 @@ export function AppLayout() {
                   <div className="truncate" style={{ color: 'var(--text-muted)' }}>
                     {user.email}
                   </div>
+                  <NavLink
+                    to="/profile"
+                    onClick={closeMobileDrawer}
+                    className="mt-2 text-xs font-medium cursor-pointer rounded px-2.5 py-1.5 w-full text-left transition-colors flex items-center justify-between no-underline"
+                    style={{
+                      background: 'rgba(255, 255, 255, 0.05)',
+                      color: 'var(--text)',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span>👤</span>
+                      <span>My Profile</span>
+                    </span>
+                    <span style={{ color: 'var(--text-muted)' }}>→</span>
+                  </NavLink>
                   {user.role === 'SUPER_ADMIN' && (
                     <button
                       type="button"
@@ -366,6 +375,21 @@ export function AppLayout() {
               <div className="truncate" style={{ color: 'var(--text-muted)' }}>
                 {user.email}
               </div>
+              <NavLink
+                to="/profile"
+                className="mt-2 text-xs font-medium cursor-pointer rounded px-2.5 py-1.5 w-full text-left transition-colors flex items-center justify-between no-underline"
+                style={{
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  color: 'var(--text)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                <span className="flex items-center gap-1.5">
+                  <span>👤</span>
+                  <span>My Profile</span>
+                </span>
+                <span style={{ color: 'var(--text-muted)' }}>→</span>
+              </NavLink>
               {user.role === 'SUPER_ADMIN' && (
                 <button
                   type="button"

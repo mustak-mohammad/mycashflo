@@ -13,16 +13,11 @@ const LoginPage = lazy(() => import('./pages/LoginPage'))
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const CustomersPage = lazy(() => import('./pages/CustomersPage'))
 const InvoicesPage = lazy(() => import('./pages/InvoicesPage'))
-const CollectionsPage = lazy(() => import('./pages/CollectionsPage'))
 const PaymentsPage = lazy(() => import('./pages/PaymentsPage'))
 const VoicePage = lazy(() => import('./pages/VoicePage'))
-const CallHistoryPage = lazy(() => import('./pages/CallHistoryPage'))
-const FollowUpPage = lazy(() => import('./pages/FollowUpPage'))
 const ReportsPage = lazy(() => import('./pages/ReportsPage'))
 const ProfilePage = lazy(() => import('./pages/ProfilePage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
-const IntelligencePage = lazy(() => import('./pages/IntelligencePage'))
-const VoicePromptsPage = lazy(() => import('./pages/VoicePromptsPage'))
 const RemindersPage = lazy(() => import('./pages/RemindersPage'))
 
 // Lazy-load dedicated Super Admin platform pages
@@ -110,40 +105,13 @@ export default function App() {
                   }
                 >
                   <Route index element={<RootRedirect />} />
+                  {/* Canonical 7 V1 Tenant Routes */}
                   <Route path="/dashboard" element={<DashboardPage />} />
                   <Route path="/customers" element={<CustomersPage />} />
                   <Route path="/invoices" element={<InvoicesPage />} />
-                  <Route path="/collections" element={<CollectionsPage />} />
                   <Route path="/payments" element={<PaymentsPage />} />
-                  <Route
-                    path="/intelligence"
-                    element={
-                      <RequireRole allowedRoles={['ADMIN', 'MANAGER']}>
-                        <IntelligencePage />
-                      </RequireRole>
-                    }
-                  />
-                  <Route path="/voice" element={<VoicePage />} />
-                  <Route
-                    path="/voice-prompts"
-                    element={
-                      <RequireRole allowedRoles={['ADMIN', 'MANAGER']}>
-                        <VoicePromptsPage />
-                      </RequireRole>
-                    }
-                  />
-                  <Route
-                    path="/reminders"
-                    element={
-                      <RequireRole allowedRoles={['ADMIN', 'MANAGER']}>
-                        <RemindersPage />
-                      </RequireRole>
-                    }
-                  />
-                  <Route path="/calls" element={<CallHistoryPage />} />
-                  <Route path="/follow-ups" element={<FollowUpPage />} />
+                  <Route path="/reminders" element={<RemindersPage />} />
                   <Route path="/reports" element={<ReportsPage />} />
-                  <Route path="/profile" element={<ProfilePage />} />
                   <Route
                     path="/settings"
                     element={
@@ -152,6 +120,27 @@ export default function App() {
                       </RequireRole>
                     }
                   />
+
+                  {/* User Profile & Security (Linked from user avatar / settings) */}
+                  <Route path="/profile" element={<ProfilePage />} />
+
+                  {/* V1 Navigation Compatibility Redirects */}
+                  <Route path="/collections" element={<Navigate to="/reminders?tab=rules" replace />} />
+                  <Route path="/calls" element={<Navigate to="/reminders?tab=calls" replace />} />
+                  <Route path="/follow-ups" element={<Navigate to="/reminders?tab=tasks" replace />} />
+                  <Route path="/intelligence" element={<Navigate to="/reminders?tab=history" replace />} />
+                  <Route path="/voice-prompts" element={<Navigate to="/settings?tab=prompts" replace />} />
+
+                  {/* Internal Developer Voice Console (Hidden from Customer Navigation) */}
+                  <Route
+                    path="/dev/voice-console"
+                    element={
+                      <RequireRole allowedRoles={['ADMIN', 'MANAGER']}>
+                        <VoicePage />
+                      </RequireRole>
+                    }
+                  />
+                  <Route path="/voice" element={<Navigate to="/dev/voice-console" replace />} />
                 </Route>
               </Route>
 

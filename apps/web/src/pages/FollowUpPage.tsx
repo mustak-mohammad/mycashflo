@@ -15,7 +15,7 @@ const PRIORITY_COLOR: Record<string, string> = {
   LOW: 'var(--accent)',
 }
 
-export default function FollowUpPage() {
+export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
   const toast = useToast()
   const [filterDone, setFilterDone] = useState<boolean | undefined>(undefined)
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -103,24 +103,39 @@ export default function FollowUpPage() {
   }
 
   return (
-    <div className="p-4 sm:p-6 max-w-4xl mx-auto">
-      <PageHeader
-        title="Follow-Up Tasks"
-        subtitle="Scheduled tasks and reminders for your collection team"
-        action={
+    <div className={hideHeader ? 'space-y-4' : 'p-4 sm:p-6 max-w-4xl mx-auto'}>
+      {!hideHeader ? (
+        <PageHeader
+          title="Follow-Up Tasks"
+          subtitle="Scheduled tasks and reminders for your collection team"
+          action={
+            <button
+              type="button"
+              onClick={() => {
+                setFormError(null)
+                setIsModalOpen(true)
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-medium text-white cursor-pointer"
+              style={{ background: 'var(--primary)', border: 'none' }}
+            >
+              + Add Task
+            </button>
+          }
+        />
+      ) : (
+        <div className="flex justify-end">
           <button
             type="button"
             onClick={() => {
               setFormError(null)
               setIsModalOpen(true)
             }}
-            className="px-4 py-2 rounded-lg text-sm font-medium text-white cursor-pointer"
-            style={{ background: 'var(--primary)', border: 'none' }}
+            className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 cursor-pointer"
           >
             + Add Task
           </button>
-        }
-      />
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 gap-4 mb-6">
@@ -392,4 +407,8 @@ export default function FollowUpPage() {
       />
     </div>
   )
+}
+
+export default function FollowUpPage() {
+  return <FollowUpsView />
 }

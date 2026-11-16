@@ -71,7 +71,7 @@ async function extractSafeApiError(err: unknown, fallback: string): Promise<stri
   return sanitizeUiErrorMessage(axiosLike?.message, fallback)
 }
 
-export default function VoicePromptsPage() {
+export function VoicePromptsView({ hideHeader }: { hideHeader?: boolean } = {}) {
   const [prompts, setPrompts] = useState<VoicePrompt[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -315,13 +315,15 @@ export default function VoicePromptsPage() {
     Boolean(category) && !isCanonicalPromptCategory(category)
 
   return (
-    <div style={{ padding: '24px 32px', maxWidth: '1400px', margin: '0 auto' }}>
+    <div style={{ padding: hideHeader ? '0' : '24px 32px', maxWidth: '1400px', margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px', flexWrap: 'wrap', gap: '16px' }}>
-        <PageHeader
-          title="Voice Prompts & Templates"
-          subtitle="Create, customize, and export structured Chotu AI collection prompts with dynamic accounting variables."
-        />
-        <div style={{ display: 'flex', gap: '12px' }}>
+        {!hideHeader && (
+          <PageHeader
+            title="Voice Prompts & Templates"
+            subtitle="Create, customize, and export structured Chotu AI collection prompts with dynamic accounting variables."
+          />
+        )}
+        <div style={{ display: 'flex', gap: '12px', marginLeft: hideHeader ? 'auto' : undefined }}>
           <button
             type="button"
             onClick={handleDownloadZip}
@@ -1194,4 +1196,8 @@ export default function VoicePromptsPage() {
       )}
     </div>
   )
+}
+
+export default function VoicePromptsPage() {
+  return <VoicePromptsView />
 }
