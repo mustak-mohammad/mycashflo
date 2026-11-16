@@ -1,6 +1,12 @@
-import { IsString, IsOptional, IsEnum, IsBoolean, MinLength } from 'class-validator';
+import { IsString, IsOptional, IsEnum, IsBoolean, MinLength, Matches } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
+import {
+  PASSWORD_COMPLEXITY_MESSAGE,
+  PASSWORD_COMPLEXITY_REGEX,
+  PASSWORD_LENGTH_MESSAGE,
+  PASSWORD_MIN_LENGTH,
+} from '../../common/password-policy.js';
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ example: 'Pooja Verma' })
@@ -18,9 +24,14 @@ export class UpdateUserDto {
   @IsBoolean()
   isActive?: boolean;
 
-  @ApiPropertyOptional({ example: 'NewSecretPass123!' })
+  @ApiPropertyOptional({
+    example: 'NewSecretPass123!',
+    description: 'Updated password (minimum 8 characters with uppercase, lowercase, and at least one number or symbol)',
+    minLength: PASSWORD_MIN_LENGTH,
+  })
   @IsOptional()
   @IsString()
-  @MinLength(8)
+  @MinLength(PASSWORD_MIN_LENGTH, { message: PASSWORD_LENGTH_MESSAGE })
+  @Matches(PASSWORD_COMPLEXITY_REGEX, { message: PASSWORD_COMPLEXITY_MESSAGE })
   password?: string;
 }

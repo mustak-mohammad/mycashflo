@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { ActionRisk, ProposalStatus, NotificationChannel, CasePriority, InvoiceStatus } from '@prisma/client';
+import { ActionRisk, ProposalStatus, NotificationChannel, CasePriority, InvoiceStatus, ConsentState } from '@prisma/client';
 import { IsOptional, IsString, IsBoolean, IsObject, IsEnum } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -667,10 +667,30 @@ export class IntelligenceService {
     const dndTag = `[DND:NO_CONTACT${reasonText} - Recorded on ${timestamp}]`;
     const updatedNotes = customer.notes ? `${dndTag}\n${customer.notes}` : dndTag;
 
+    const channel = (params.channel || 'ALL').toUpperCase();
+    const consentUpdate: any = {};
+    const now = new Date();
+    if (channel === 'WHATSAPP' || channel === 'ALL') {
+      consentUpdate.whatsappConsent = ConsentState.OPTED_OUT;
+      consentUpdate.whatsappConsentAt = now;
+      consentUpdate.whatsappConsentSource = 'CHOTU_CEASE_CONTACT';
+    }
+    if (channel === 'EMAIL' || channel === 'ALL') {
+      consentUpdate.emailConsent = ConsentState.OPTED_OUT;
+      consentUpdate.emailConsentAt = now;
+      consentUpdate.emailConsentSource = 'CHOTU_CEASE_CONTACT';
+    }
+    if (channel === 'SMS' || channel === 'ALL') {
+      consentUpdate.smsConsent = ConsentState.OPTED_OUT;
+      consentUpdate.smsConsentAt = now;
+      consentUpdate.smsConsentSource = 'CHOTU_CEASE_CONTACT';
+    }
+
     const updatedCustomer = await this.prisma.customer.update({
       where: { id: customer.id },
       data: {
         notes: updatedNotes,
+        ...consentUpdate,
       },
     });
 

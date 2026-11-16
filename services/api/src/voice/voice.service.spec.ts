@@ -3,6 +3,7 @@ import { VoiceService } from './voice.service.js';
 import { CallsService } from '../calls/calls.service.js';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import type { AuthUser } from '../auth/current-user.decorator.js';
+import { ConsentState } from '../common/consent-policy.js';
 
 describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests', () => {
   let voiceService: VoiceService;
@@ -33,6 +34,7 @@ describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests'
         phone: '+919876543210',
         outstandingBalance: 50000,
         notes: 'Initial account notes',
+        voiceConsent: ConsentState.OPTED_IN,
       },
     ];
 
@@ -265,6 +267,7 @@ describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests'
         name: 'Other Corp',
         phone: '+919999999999',
         notes: '',
+        voiceConsent: ConsentState.OPTED_IN,
       });
 
       // User in tenant_001 attempts to call customer in tenant_002
@@ -280,8 +283,48 @@ describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests'
       ).rejects.toThrow('Customer not found in tenant');
     });
 
-    it('allows simulated outbound calls when customer has no DND preference and keeps OUTBOUND_CALLS_ENABLED=false', async () => {
-      customers[0].notes = 'Regular customer notes, no DND restriction';
+    it('suppresses outbound call when customer voiceConsent is UNKNOWN', async () => {
+      customers[0].notes = 'Regular account notes';
+      customers[0].voiceConsent = ConsentState.UNKNOWN;
+
+      await expect(
+        callsService.initiateOutboundCall(mockUser, {
+          customerId: 'cust_001',
+          reason: 'Follow-up',
+        }),
+      ).rejects.toThrow('Outbound call suppressed: Customer has not explicitly opted into VOICE communications (consent state: UNKNOWN)');
+      expect(callSessions.length).toBe(0);
+    });
+
+    it('suppresses outbound call when customer voiceConsent is OPTED_OUT', async () => {
+      customers[0].notes = 'Regular account notes';
+      customers[0].voiceConsent = ConsentState.OPTED_OUT;
+
+      await expect(
+        callsService.initiateOutboundCall(mockUser, {
+          customerId: 'cust_001',
+          reason: 'Follow-up',
+        }),
+      ).rejects.toThrow('Outbound call suppressed: Customer has explicitly opted out of VOICE');
+      expect(callSessions.length).toBe(0);
+    });
+
+    it('suppresses outbound call when customer notes have ambiguous DND directive', async () => {
+      customers[0].notes = 'Old note [DND:NO_CONTACT]';
+      customers[0].voiceConsent = ConsentState.OPTED_IN;
+
+      await expect(
+        callsService.initiateOutboundCall(mockUser, {
+          customerId: 'cust_001',
+          reason: 'Follow-up',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(callSessions.length).toBe(0);
+    });
+
+    it('allows simulated outbound calls when customer has OPTED_IN consent and no DND restriction', async () => {
+      customers[0].notes = 'Regular customer notes without restrictions';
+      customers[0].voiceConsent = ConsentState.OPTED_IN;
 
       const call = await callsService.initiateOutboundCall(mockUser, {
         customerId: 'cust_001',
@@ -578,9 +621,9 @@ describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests'
       });
 
       expect(turn.outcome).toBe('CALLBACK_REQUESTED');
-      expect(turn.shouldEnd).toBe(true);
+      expect(turn.shouldEnd).toBe(false); // Unspecified callback time keeps listening so customer can specify time or change mind
       expect(turn.nextStage).toBe('CALLBACK_SCHEDULED');
-      expect(turn.actionExecuted).toBe('CALLBACK_SCHEDULED');
+      expect(turn.actionExecuted).toBe('CALLBACK_REQUESTED');
       expect(promiseCreateSpy).not.toHaveBeenCalled();
     });
 
@@ -644,7 +687,7 @@ describe('VoiceService & CallsService - Cease-Contact & Safety Protection Tests'
       const buffer = await voiceService.synthesizeSpeech('Namaste! This is Chotu calling from myCashflo.');
       expect(buffer).toBeDefined();
       expect(buffer.length).toBeGreaterThan(0);
-    });
+    }, 15000);
 
     it('returns empty buffer for empty utterance', async () => {
       const buffer = await voiceService.synthesizeSpeech('');

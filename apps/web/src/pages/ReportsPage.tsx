@@ -4,6 +4,8 @@ import { StatCard } from '../components/ui/StatCard'
 import { useApi } from '../hooks/useApi'
 import { reportsApi } from '../api/reports'
 import { customersApi } from '../api/customers'
+import { useToast } from '../store/ToastContext'
+import { extractSafeApiError, extractSafeErrorMessage } from '../utils/safeError'
 import type { Customer, LedgerResponse, LedgerEntry } from '../types'
 
 function fmt(n: number) {
@@ -19,6 +21,7 @@ function Skeleton({ className }: { className?: string }) {
 }
 
 export default function ReportsPage() {
+  const toast = useToast()
   const [activeTab, setActiveTab] = useState<'overview' | 'ledger'>('overview')
 
   // Overview stats fetchers
@@ -30,39 +33,48 @@ export default function ReportsPage() {
 
   // Customer Ledger state
   const [customers, setCustomers] = useState<Customer[]>([])
+  const [customersError, setCustomersError] = useState<string | null>(null)
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('')
   const [startDate, setStartDate] = useState<string>('')
   const [endDate, setEndDate] = useState<string>('')
   const [ledgerData, setLedgerData] = useState<LedgerResponse | null>(null)
   const [ledgerLoading, setLedgerLoading] = useState(false)
+  const [ledgerError, setLedgerError] = useState<string | null>(null)
   const [exportingFormat, setExportingFormat] = useState<'csv' | 'xlsx' | null>(null)
 
   // Load customer options
   useEffect(() => {
-    customersApi.list({ limit: 100 })
+    customersApi
+      .list({ limit: 100 })
       .then((res) => {
         const list = Array.isArray(res) ? res : res?.data || []
         setCustomers(list)
+        setCustomersError(null)
       })
-      .catch((err) => console.error('Failed to load customers for ledger filter:', err))
+      .catch((err) => {
+        setCustomersError(extractSafeErrorMessage(err, 'Failed to load customer filter options.'))
+      })
   }, [])
 
   // Fetch Ledger data
   const loadLedger = useCallback(async () => {
     try {
       setLedgerLoading(true)
+      setLedgerError(null)
       const data = await reportsApi.getLedger({
         customerId: selectedCustomerId || undefined,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
       })
       setLedgerData(data)
-    } catch (err: any) {
-      console.error('Failed to fetch ledger:', err)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to load customer general ledger.')
+      setLedgerError(msg)
+      toast.error(msg)
     } finally {
       setLedgerLoading(false)
     }
-  }, [selectedCustomerId, startDate, endDate])
+  }, [selectedCustomerId, startDate, endDate, toast])
 
   useEffect(() => {
     if (activeTab === 'ledger') {
@@ -73,14 +85,18 @@ export default function ReportsPage() {
   const handleDownload = async (format: 'csv' | 'xlsx') => {
     try {
       setExportingFormat(format)
+      setLedgerError(null)
       await reportsApi.downloadLedger({
         customerId: selectedCustomerId || undefined,
         startDate: startDate || undefined,
         endDate: endDate || undefined,
         format,
       })
-    } catch (err: any) {
-      alert('Failed to export ledger: ' + (err?.message || 'Unknown error'))
+      toast.success(`Customer ledger exported as ${format.toUpperCase()}.`)
+    } catch (err: unknown) {
+      const msg = await extractSafeApiError(err, 'Failed to export ledger statement.')
+      setLedgerError(msg)
+      toast.error(msg)
     } finally {
       setExportingFormat(null)
     }
@@ -197,6 +213,29 @@ export default function ReportsPage() {
 
       {activeTab === 'ledger' && (
         <div>
+          {(ledgerError || customersError) && (
+            <div
+              role="alert"
+              className="rounded-lg px-4 py-3 text-sm mb-4 flex items-center justify-between gap-3"
+              style={{
+                background: 'rgba(239,68,68,0.12)',
+                border: '1px solid var(--danger)',
+                color: 'var(--danger)',
+              }}
+            >
+              <span>⚠️ {ledgerError || customersError}</span>
+              {ledgerError && (
+                <button
+                  type="button"
+                  onClick={loadLedger}
+                  className="px-3 py-1 rounded text-xs font-semibold bg-rose-800 hover:bg-rose-700 text-white cursor-pointer"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Ledger Filters & Download Bar */}
           <div
             className="p-5 rounded-xl mb-6"

@@ -2,9 +2,17 @@
 import { spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
+import { PrismaClient } from '@prisma/client';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const API_DIR = path.resolve(__dirname, '..');
 
 const BASE_URL = 'http://localhost:3000/api';
+const TEST_TELEPHONY_WEBHOOK_SECRET = 'full_verify_telephony_webhook_secret';
 let apiProcess = null;
+const prisma = new PrismaClient();
 
 async function request(reqPath, options = {}) {
   const url = `${BASE_URL}${reqPath}`;
@@ -42,11 +50,24 @@ async function startServerIfNeeded() {
   }
 
   console.log('🚀 Launching API server from dist/main.js for end-to-end verification...');
-  const apiDir = path.resolve('services/api');
   apiProcess = spawn('node', ['dist/main.js'], {
-    cwd: apiDir,
+    cwd: API_DIR,
     stdio: 'inherit',
-    env: { ...process.env, PORT: '3000', NODE_ENV: 'development' },
+    env: {
+      ...process.env,
+      PORT: '3000',
+      NODE_ENV: 'development',
+      ENABLE_OUTBOUND_CALLS: 'false',
+      OUTBOUND_CALLS_ENABLED: 'false',
+      AUTOMATED_REMINDERS_ENABLED: 'false',
+      EMAIL_DELIVERY_ENABLED: 'false',
+      PAYMENT_SIMULATION_MODE: 'true',
+      RAZORPAY_WEBHOOK_SECRET: 'rzp_whsec_mycashflo',
+      WHATSAPP_VERIFY_TOKEN: 'mycashflo_whatsapp_verify_token',
+      WHATSAPP_ACCESS_TOKEN: 'mock_wa_token',
+      RESEND_API_KEY: 'mock_re_key',
+      TELEPHONY_WEBHOOK_SECRET: TEST_TELEPHONY_WEBHOOK_SECRET,
+    },
   });
 
   const ready = await waitForServer(30, 1000);
@@ -66,6 +87,13 @@ async function run() {
   let passed = 0;
   let failed = 0;
   const results = [];
+  const runStartedAt = new Date();
+  let createdCustomerId = null;
+  let createdInvoiceId = null;
+  let createdProposalId = null;
+  let tenantIdForCleanup = null;
+  let originalIntegrationConfigs = [];
+  const createdReplayKeys = [];
 
   function record(section, name, condition, details = '') {
     if (condition) {
@@ -109,6 +137,36 @@ async function run() {
     record('Auth', 'Admin login succeeds and returns signed JWT', [200, 201].includes(adminLogin.status) && !!adminToken, `User: ${adminLogin.data?.user?.email}, Role: ${adminLogin.data?.user?.role}`);
 
     const adminAuth = { Authorization: `Bearer ${adminToken}` };
+    tenantIdForCleanup = adminLogin.data?.user?.tenantId;
+    if (tenantIdForCleanup) {
+      originalIntegrationConfigs = await prisma.integrationConfig.findMany({
+        where: { tenantId: tenantIdForCleanup },
+      });
+      // Ensure WhatsApp and Resend are explicitly mocked before any notification endpoint is exercised
+      await request('/integrations/WHATSAPP_CLOUD', {
+        method: 'PUT',
+        headers: adminAuth,
+        body: JSON.stringify({
+          config: {
+            phoneNumberId: 'phone_id_sim_test',
+            accessToken: 'EAAG_whatsapp_cloud_access_token_mock',
+            verifyToken: 'mycashflo_whatsapp_verify_token',
+          },
+          isActive: true,
+        }),
+      });
+      await request('/integrations/RESEND', {
+        method: 'PUT',
+        headers: adminAuth,
+        body: JSON.stringify({
+          config: {
+            apiKey: 'mock_re_key_verification',
+            from: 'myCashflo <onboarding@resend.dev>',
+          },
+          isActive: true,
+        }),
+      });
+    }
 
     // Agent Login
     const agentLogin = await request('/auth/login', {
@@ -136,7 +194,22 @@ async function run() {
     const customersRes = await request('/customers?limit=10', { headers: adminAuth });
     const customers = customersRes.data?.data || [];
     record('Customers', 'Customers listing returns seeded accounts', customersRes.status === 200 && customers.length > 0, `Count: ${customers.length}`);
-    const testCustomer = customers[0];
+
+    // Create isolated synthetic customer & invoice so real customer/invoice data is untouched
+    const createCustRes = await request('/customers', {
+      method: 'POST',
+      headers: adminAuth,
+      body: JSON.stringify({
+        name: 'Full Verify Synthetic Client',
+        email: `full-synth-${Date.now().toString(36)}@synthetic.test`,
+        phone: '+919999900088',
+        company: 'Synthetic Full Verification Ltd',
+      }),
+    });
+    const testCustomer = createCustRes.data;
+    if (createCustRes.status === 201 || createCustRes.status === 200) {
+      createdCustomerId = testCustomer.id;
+    }
 
     const singleCustRes = await request(`/customers/${testCustomer.id}`, { headers: adminAuth });
     record('Customers', 'Customer detail endpoint returns customer profile and relationship data', singleCustRes.status === 200 && singleCustRes.data?.id === testCustomer.id);
@@ -145,28 +218,31 @@ async function run() {
     const invoices = invoicesRes.data?.data || [];
     record('Invoices', 'Invoices listing returns active invoices across statuses', invoicesRes.status === 200 && invoices.length > 0, `Count: ${invoices.length}`);
 
-    let overdueInv = invoices.find((inv) => Number(inv.outstanding) > 0 && inv.status !== 'PAID');
-    if (!overdueInv) {
-      const createInvRes = await request('/invoices', {
-        method: 'POST',
+    const createInvRes = await request('/invoices', {
+      method: 'POST',
+      headers: adminAuth,
+      body: JSON.stringify({
+        customerId: testCustomer.id,
+        number: `INV-VERIFY-${Date.now().toString(36).toUpperCase()}`,
+        amount: 35000,
+        issueDate: new Date(Date.now() - 86400000 * 15).toISOString().slice(0, 10),
+        dueDate: new Date(Date.now() - 86400000 * 5).toISOString().slice(0, 10),
+        description: 'E2E Verification Invoice (Synthetic)',
+        currency: 'INR',
+      }),
+    });
+    const overdueInv = createInvRes.data;
+    if ([200, 201].includes(createInvRes.status) && overdueInv?.id) {
+      createdInvoiceId = overdueInv.id;
+      await request(`/invoices/${overdueInv.id}`, {
+        method: 'PATCH',
         headers: adminAuth,
-        body: JSON.stringify({
-          customerId: testCustomer.id,
-          number: `INV-VERIFY-${Date.now().toString().slice(-6)}`,
-          amount: 35000,
-          issueDate: new Date(Date.now() - 86400000 * 15).toISOString().slice(0, 10),
-          dueDate: new Date(Date.now() - 86400000 * 5).toISOString().slice(0, 10),
-          description: 'E2E Verification Invoice',
-          currency: 'INR',
-        }),
+        body: JSON.stringify({ status: 'OVERDUE' }),
       });
-      if ([200, 201].includes(createInvRes.status)) {
-        overdueInv = createInvRes.data;
-      } else {
-        overdueInv = invoices[0];
-      }
+      overdueInv.status = 'OVERDUE';
+      overdueInv.outstanding = 35000;
     }
-    record('Invoices', 'Invoice identified for collections & payment workflow', !!overdueInv, `Invoice: ${overdueInv?.number}, Due: ₹${overdueInv?.outstanding || overdueInv?.amount}, Status: ${overdueInv?.status}`);
+    record('Invoices', 'Isolated invoice created for collections & payment workflow', Boolean(overdueInv?.id), `Invoice: ${overdueInv?.number}, Due: ₹${overdueInv?.outstanding || overdueInv?.amount}, Status: ${overdueInv?.status}`);
 
     const paymentsRes = await request('/payments?limit=10', { headers: adminAuth });
     record('Payments', 'Payments history endpoint accessible and returns records', paymentsRes.status === 200);
@@ -242,6 +318,9 @@ async function run() {
       }),
     });
     const proposal = toolExecPtp.data?.proposal;
+    if (proposal?.id) {
+      createdProposalId = proposal.id;
+    }
     record('Intelligence', 'Human-in-the-loop Guard intercepts unconfirmed consequential action', 
       [200, 201].includes(toolExecPtp.status) && toolExecPtp.data?.status === 'REQUIRES_CONFIRMATION' && !!proposal?.id,
       `Proposal ID: ${proposal?.id}, Action: ${proposal?.actionType}`
@@ -286,6 +365,7 @@ async function run() {
           invoiceNumber: overdueInv.number,
           amount: overdueInv.amount,
           dueDate: overdueInv.dueDate,
+          companyContactNumber: '+919800000001',
         },
       }),
     });
@@ -390,28 +470,30 @@ async function run() {
     const testSip = await request('/integrations/SIP_TELEPHONY/test', { method: 'POST', headers: adminAuth });
     record('Integrations', 'SIP Telephony connectivity test confirms gateway readiness and safety guard', [200, 201].includes(testSip.status) && testSip.data?.status === 'SUCCESS' && testSip.data?.isSimulated, testSip.data?.message);
 
-    // Payment Link Generation: Razorpay
+    // Payment Link Generation: Razorpay (forced safe simulation)
     const rzpLinkRes = await request('/payments/link', {
       method: 'POST',
       headers: adminAuth,
       body: JSON.stringify({
         invoiceId: overdueInv.id,
         provider: 'RAZORPAY',
+        simulate: true,
         description: 'Settlement for Overdue Invoice',
       }),
     });
-    record('PaymentLinks', 'Razorpay payment link generated with tracking ID and URL', 
-      [200, 201].includes(rzpLinkRes.status) && rzpLinkRes.data?.shortUrl?.includes('rzp.io'),
+    record('PaymentLinks', 'Razorpay payment link generated in safe simulation mode with tracking ID and URL', 
+      [200, 201].includes(rzpLinkRes.status) && rzpLinkRes.data?.shortUrl?.includes('rzp.io') && rzpLinkRes.data?.isSimulated === true,
       `Link ID: ${rzpLinkRes.data?.paymentLinkId}, URL: ${rzpLinkRes.data?.shortUrl}`
     );
 
-    // Payment Link Generation: Stripe
+    // Payment Link Generation: Stripe (forced safe simulation)
     const stripeLinkRes = await request('/payments/link', {
       method: 'POST',
       headers: adminAuth,
       body: JSON.stringify({
         invoiceId: overdueInv.id,
         provider: 'STRIPE',
+        simulate: true,
         description: 'Global Card Settlement',
       }),
     });
@@ -506,16 +588,58 @@ async function run() {
       `Call SID: ${outboundCall.data?.callSid}, Status: ${outboundCall.data?.status}`
     );
 
-    // Carrier Webhook Callback
-    const carrierWebhook = await request('/calls/webhook/sip_gateway', {
-      method: 'POST',
+    // Configure SIP Telephony webhook secret for authenticated callback verification
+    await request('/integrations/SIP_TELEPHONY', {
+      method: 'PUT',
+      headers: adminAuth,
       body: JSON.stringify({
-        CallSid: outboundCall.data?.callSid || 'call_sess_mock',
-        CallStatus: 'completed',
-        CallDuration: '45',
+        config: {
+          sipTrunkUri: 'sip.sandbox.carrier.test',
+          webhookSecret: TEST_TELEPHONY_WEBHOOK_SECRET,
+        },
+        isActive: true,
       }),
     });
-    record('Telephony', 'Carrier callback webhook processed and logs call termination', carrierWebhook.status === 200 && carrierWebhook.data?.received === true);
+
+    // Carrier Webhook Callback Security (Missing Auth, Invalid Auth, Valid Auth, Replay)
+    const telWebhookBody = JSON.stringify({
+      CallSid: outboundCall.data?.callSid || 'call_sess_mock',
+      CallStatus: 'completed',
+      CallDuration: '45',
+    });
+
+    const missingAuthWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      body: telWebhookBody,
+    });
+    record('Telephony', 'Telephony webhook rejects missing authentication with 401', missingAuthWebhook.status === 401, `Status: ${missingAuthWebhook.status}`);
+
+    const invalidAuthWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong_invalid_secret' },
+      body: telWebhookBody,
+    });
+    record('Telephony', 'Telephony webhook rejects invalid authentication with 401', invalidAuthWebhook.status === 401, `Status: ${invalidAuthWebhook.status}`);
+
+    const carrierWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_TELEPHONY_WEBHOOK_SECRET}` },
+      body: telWebhookBody,
+    });
+    record('Telephony', 'Authenticated carrier callback webhook processed and logs call termination', carrierWebhook.status === 200 && carrierWebhook.data?.received === true);
+
+    const replayFp = crypto
+      .createHash('sha256')
+      .update(`SIP_TRUNK|${telWebhookBody}`)
+      .digest('hex');
+    createdReplayKeys.push(`SIP_TRUNK:fp:${replayFp}`);
+
+    const replayWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_TELEPHONY_WEBHOOK_SECRET}` },
+      body: telWebhookBody,
+    });
+    record('Telephony', 'Telephony webhook rejects duplicate replay with 401', replayWebhook.status === 401, `Status: ${replayWebhook.status}`);
 
     // ---------------------------------------------------------
     // 7. MULTI-TENANT ISOLATION SECURITY
@@ -541,6 +665,55 @@ async function run() {
     console.error('💥 Unexpected execution error during verification:', err);
     failed++;
   } finally {
+    try {
+      if (createdReplayKeys.length > 0) {
+        await prisma.webhookReplay.deleteMany({ where: { replayKey: { in: createdReplayKeys } } });
+      }
+      if (createdProposalId) {
+        await prisma.actionProposal.deleteMany({ where: { id: createdProposalId } });
+      }
+      if (createdCustomerId) {
+        await prisma.paymentPromise.deleteMany({ where: { invoiceId: createdInvoiceId || undefined } });
+        await prisma.notification.deleteMany({ where: { customerId: createdCustomerId } });
+        await prisma.callSession.deleteMany({ where: { customerId: createdCustomerId } });
+      }
+      if (createdInvoiceId) {
+        await prisma.payment.deleteMany({ where: { invoiceId: createdInvoiceId } });
+        await prisma.invoice.deleteMany({ where: { id: createdInvoiceId } });
+      }
+      if (createdCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: createdCustomerId } });
+      }
+      if (tenantIdForCleanup) {
+        await prisma.notification.deleteMany({
+          where: { tenantId: tenantIdForCleanup, createdAt: { gte: runStartedAt } },
+        });
+        const savedMap = new Map(originalIntegrationConfigs.map((c) => [c.provider, c]));
+        for (const prov of ['RAZORPAY', 'STRIPE', 'WHATSAPP_CLOUD', 'SIP_TELEPHONY', 'RESEND']) {
+          const orig = savedMap.get(prov);
+          if (orig) {
+            await prisma.integrationConfig.upsert({
+              where: { provider_tenantId: { provider: prov, tenantId: tenantIdForCleanup } },
+              update: { config: orig.config, isActive: orig.isActive },
+              create: {
+                provider: orig.provider,
+                config: orig.config,
+                isActive: orig.isActive,
+                tenantId: tenantIdForCleanup,
+              },
+            });
+          } else {
+            await prisma.integrationConfig.deleteMany({
+              where: { tenantId: tenantIdForCleanup, provider: prov },
+            });
+          }
+        }
+      }
+    } catch (cleanErr) {
+      console.warn('Non-fatal cleanup warning:', cleanErr.message);
+    }
+    await prisma.$disconnect();
+
     if (apiProcess) {
       console.log('\n🛑 Terminating spawned test API server process...');
       apiProcess.kill();

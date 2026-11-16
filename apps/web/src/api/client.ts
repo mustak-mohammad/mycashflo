@@ -1,4 +1,12 @@
 import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
+import {
+  clearStoredAuth,
+  getStoredAccessToken,
+  getStoredRefreshToken,
+  notifySessionExpired,
+  savePostLoginRedirect,
+  setStoredTokens,
+} from '../utils/authStorage'
 
 /**
  * Central Axios instance.
@@ -13,7 +21,7 @@ const apiClient = axios.create({
 
 // Attach bearer token from localStorage on every request
 apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = localStorage.getItem('mcf_access_token')
+  const token = getStoredAccessToken()
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -38,6 +46,15 @@ const processQueue = (error: unknown, token: string | null = null) => {
   failedQueue = []
 }
 
+function expireSessionAndPreserveRoute() {
+  clearStoredAuth()
+  delete apiClient.defaults.headers.common.Authorization
+  if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+    savePostLoginRedirect(window.location.pathname + window.location.search)
+  }
+  notifySessionExpired()
+}
+
 // Handle 401 responses: attempt silent refresh with token rotation and loop prevention
 apiClient.interceptors.response.use(
   (response) => response,
@@ -58,25 +75,14 @@ apiClient.interceptors.response.use(
     // If 401 happened on an authentication endpoint or request was already retried, do not loop
     if (isAuthRoute || originalRequest._retry) {
       if (isAuthRoute && !requestUrl.includes('/auth/login')) {
-        localStorage.removeItem('mcf_access_token')
-        localStorage.removeItem('mcf_refresh_token')
-        localStorage.removeItem('mcf_user')
-        if (window.location.pathname !== '/login') {
-          sessionStorage.setItem('mcf_redirect_after_login', window.location.pathname + window.location.search)
-          window.location.href = '/login'
-        }
+        expireSessionAndPreserveRoute()
       }
       return Promise.reject(error)
     }
 
-    const refreshToken = localStorage.getItem('mcf_refresh_token')
+    const refreshToken = getStoredRefreshToken()
     if (!refreshToken) {
-      localStorage.removeItem('mcf_access_token')
-      localStorage.removeItem('mcf_user')
-      if (window.location.pathname !== '/login') {
-        sessionStorage.setItem('mcf_redirect_after_login', window.location.pathname + window.location.search)
-        window.location.href = '/login'
-      }
+      expireSessionAndPreserveRoute()
       return Promise.reject(error)
     }
 
@@ -104,30 +110,25 @@ apiClient.interceptors.response.use(
 
       const { accessToken: newAccessToken, refreshToken: newRefreshToken } = res.data.tokens
 
-      localStorage.setItem('mcf_access_token', newAccessToken)
-      localStorage.setItem('mcf_refresh_token', newRefreshToken)
+      setStoredTokens(newAccessToken, newRefreshToken)
 
       apiClient.defaults.headers.common.Authorization = `Bearer ${newAccessToken}`
-      originalRequest.headers.Authorization = `Bearer ${newAccessToken}`
+      originalRequest.headers.Authorization = `Bearer ${newTokenOrDefault(newAccessToken)}`
 
       processQueue(null, newAccessToken)
       return apiClient(originalRequest)
     } catch (refreshErr) {
       processQueue(refreshErr, null)
-      localStorage.removeItem('mcf_access_token')
-      localStorage.removeItem('mcf_refresh_token')
-      localStorage.removeItem('mcf_user')
-
-      // Preserve current location / form state so user can return after logging in
-      if (window.location.pathname !== '/login') {
-        sessionStorage.setItem('mcf_redirect_after_login', window.location.pathname + window.location.search)
-        window.location.href = '/login'
-      }
+      expireSessionAndPreserveRoute()
       return Promise.reject(refreshErr)
     } finally {
       isRefreshing = false
     }
   },
 )
+
+function newTokenOrDefault(token: string): string {
+  return token
+}
 
 export default apiClient

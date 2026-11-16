@@ -7,4 +7,6 @@ export const authApi = {
   getProfile: () => apiClient.get<User>('/auth/me').then((r) => r.data),
   updateProfile: (name: string) =>
     apiClient.patch<User>('/auth/profile', { name }).then((r) => r.data),
+  changePassword: (dto: { currentPassword: string; newPassword: string }) =>
+    apiClient.post<{ message: string }>('/auth/change-password', dto).then((r) => r.data),
 }

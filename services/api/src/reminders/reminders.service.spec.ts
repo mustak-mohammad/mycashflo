@@ -5,7 +5,7 @@ import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { IntegrationsService } from '../integrations/integrations.service.js';
 import { PromptsService } from '../prompts/prompts.service.js';
-import { InvoiceStatus, NotificationChannel, NotifStatus } from '@prisma/client';
+import { InvoiceStatus, NotificationChannel, NotifStatus, ConsentState } from '@prisma/client';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 
 describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () => {
@@ -119,6 +119,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'billing@beta.in',
             phone: '+919876543210',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
             notes: null,
           },
         },
@@ -165,6 +168,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'delta@corp.in',
             phone: '+919876543211',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -203,6 +209,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'finance@gamma.in',
             phone: '+919876543212',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -244,6 +253,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'eps@tech.in',
             phone: '+919876543213',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
             notes: 'Customer requested DND:NO_CONTACT on 2026-10-15',
           },
         },
@@ -328,6 +340,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'client@night.in',
             phone: '+919876543215',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -371,6 +386,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'dup@co.in',
             phone: '+919876543216',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -406,6 +424,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'freq@co.in',
             phone: '+919876543217',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -459,6 +480,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'dry@run.in',
             phone: '+919876543218',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -513,6 +537,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'live@company.in',
             phone: '+919876543219',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -560,7 +587,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           name: 'Real Customer (Must NOT Receive)',
           email: 'real_customer@external.com',
           phone: '+919999999999',
-        },
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+          },
       });
 
       const result = await service.sendTestReminder(mockUser, {
@@ -596,7 +625,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           name: 'Real Customer',
           email: 'real_customer@external.com',
           phone: '+919999999999',
-        },
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+          },
       });
 
       await expect(
@@ -621,7 +652,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           name: 'Real Customer',
           email: 'real_customer@external.com',
           phone: '+919999999999',
-        },
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+          },
       });
 
       await expect(
@@ -646,7 +679,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           name: 'Real Customer',
           email: 'real_customer@external.com',
           phone: '+919999999999',
-        },
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+          },
       });
 
       mockNotifications.dispatch.mockResolvedValueOnce({
@@ -702,6 +737,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'apex@solutions.in',
             phone: '+919876543220',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
         {
@@ -826,6 +864,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             email: 'real_cust@external.com',
             phone: '+919999999999',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -869,7 +910,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           name: 'Real Client Inc',
           email: 'real_ceo@client.com',
           phone: '+919876543210',
-        },
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+          },
       });
 
       // Send test reminder without providing a recipient override
@@ -991,6 +1034,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             phone: '+919876543210',
             email: 'client@overdue.com',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -1029,6 +1075,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             phone: '+919876543210',
             email: 'client@overdue.com',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -1070,6 +1119,9 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
             phone: '+919876543210',
             email: 'client3@overdue.com',
             status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_IN,
+            smsConsent: ConsentState.OPTED_IN,
           },
         },
       ]);
@@ -1093,6 +1145,119 @@ describe('RemindersService (Automated Overdue Detection & Chotu Reminders)', () 
           }),
         }),
       );
+    });
+  });
+
+  describe('Structured Customer Consent Enforcement (Phase 1C)', () => {
+    it('suppresses automated reminder when customer consent is UNKNOWN', async () => {
+      mockPrisma.integrationConfig.findUnique.mockResolvedValue({
+        provider: 'AUTOMATED_REMINDERS',
+        tenantId: 'tenant_test_1',
+        config: { enabled: true, dryRun: true, channelPreference: 'EMAIL', quietHours: { startHour: 23, endHour: 1 } },
+      });
+      const pastDue = new Date(Date.now() - 5 * 86400000);
+      mockPrisma.invoice.findMany.mockResolvedValueOnce([
+        {
+          id: 'inv_unk',
+          number: 'INV-UNK-01',
+          amount: 20000,
+          outstanding: 20000,
+          dueDate: pastDue,
+          status: InvoiceStatus.OVERDUE,
+          tenantId: 'tenant_test_1',
+          customer: {
+            id: 'cust_unk',
+            name: 'Consent Unknown Corp',
+            email: 'billing@unk.in',
+            phone: '+919876543210',
+            status: 'ACTIVE',
+            emailConsent: ConsentState.UNKNOWN,
+          },
+        },
+      ]);
+
+      const summary = await service.previewReminders(mockUser);
+      expect(summary.evaluatedCount).toBe(1);
+      expect(summary.eligibleCount).toBe(0);
+      expect(summary.suppressedCount).toBe(1);
+      expect(summary.items[0].suppressionReason).toBe('CONSENT_UNKNOWN_EMAIL');
+    });
+
+    it('suppresses automated reminder when customer consent is OPTED_OUT for the channel', async () => {
+      mockPrisma.integrationConfig.findUnique.mockResolvedValue({
+        provider: 'AUTOMATED_REMINDERS',
+        tenantId: 'tenant_test_1',
+        config: { enabled: true, dryRun: true, channelPreference: 'WHATSAPP', quietHours: { startHour: 23, endHour: 1 } },
+      });
+      const pastDue = new Date(Date.now() - 5 * 86400000);
+      mockPrisma.invoice.findMany.mockResolvedValueOnce([
+        {
+          id: 'inv_optout',
+          number: 'INV-OUT-01',
+          amount: 20000,
+          outstanding: 20000,
+          dueDate: pastDue,
+          status: InvoiceStatus.OVERDUE,
+          tenantId: 'tenant_test_1',
+          customer: {
+            id: 'cust_out',
+            name: 'Opted Out Client',
+            email: 'billing@out.in',
+            phone: '+919876543210',
+            status: 'ACTIVE',
+            whatsappConsent: ConsentState.OPTED_OUT,
+          },
+        },
+      ]);
+
+      const summary = await service.previewReminders(mockUser);
+      expect(summary.evaluatedCount).toBe(1);
+      expect(summary.eligibleCount).toBe(0);
+      expect(summary.suppressedCount).toBe(1);
+      expect(summary.items[0].suppressionReason).toBe('OPTED_OUT_WHATSAPP');
+    });
+
+    it('isolates channel consent: customer opted out of WhatsApp is eligible on Email if opted in', async () => {
+      mockPrisma.integrationConfig.findUnique.mockResolvedValue({
+        provider: 'AUTOMATED_REMINDERS',
+        tenantId: 'tenant_test_1',
+        config: { enabled: true, dryRun: true, channelPreference: 'EMAIL', quietHours: { startHour: 23, endHour: 1 } },
+      });
+      const pastDue = new Date(Date.now() - 5 * 86400000);
+      mockPrisma.invoice.findMany.mockResolvedValueOnce([
+        {
+          id: 'inv_iso',
+          number: 'INV-ISO-01',
+          amount: 20000,
+          outstanding: 20000,
+          dueDate: pastDue,
+          status: InvoiceStatus.OVERDUE,
+          tenantId: 'tenant_test_1',
+          customer: {
+            id: 'cust_iso',
+            name: 'Isolated Consent Corp',
+            email: 'billing@iso.in',
+            phone: '+919876543210',
+            status: 'ACTIVE',
+            emailConsent: ConsentState.OPTED_IN,
+            whatsappConsent: ConsentState.OPTED_OUT,
+          },
+        },
+      ]);
+      mockPrisma.invoice.findUnique.mockResolvedValueOnce({
+        id: 'inv_iso',
+        number: 'INV-ISO-01',
+        amount: 20000,
+        outstanding: 20000,
+        dueDate: pastDue,
+        status: InvoiceStatus.OVERDUE,
+      });
+
+      const summary = await service.previewReminders(mockUser);
+      expect(summary.evaluatedCount).toBe(1);
+      expect(summary.eligibleCount).toBe(1);
+      expect(summary.suppressedCount).toBe(0);
+      expect(summary.items[0].isEligible).toBe(true);
     });
   });
 });

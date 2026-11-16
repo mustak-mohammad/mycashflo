@@ -1,5 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { remindersApi } from '../../api/reminders'
+import { useToast } from '../../store/ToastContext'
+import { ConfirmDialog } from '../ui/ConfirmDialog'
+import { extractSafeErrorMessage } from '../../utils/safeError'
 import type {
   TenantReminderSettings,
   RemindersRunSummary,
@@ -30,13 +33,18 @@ const SUPPRESSION_REASONS: Record<string, string> = {
 }
 
 export function AutomatedRemindersView() {
+  const toast = useToast()
   const [settings, setSettings] = useState<TenantReminderSettings | null>(null)
   const [stats, setStats] = useState<ReminderStatsSummary | null>(null)
   const [preview, setPreview] = useState<RemindersRunSummary | null>(null)
   const [history, setHistory] = useState<ReminderHistoryItem[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
+  const [confirmLiveRunOpen, setConfirmLiveRunOpen] = useState(false)
+  const runInFlightRef = useRef(false)
   const [isScanning, setIsScanning] = useState(false)
   const [scanFeedback, setScanFeedback] = useState<{
     type: 'success' | 'empty' | 'error'
@@ -62,6 +70,7 @@ export function AutomatedRemindersView() {
   const [testFeedback, setTestFeedback] = useState<{ success: boolean; message: string } | null>(null)
 
   const loadData = useCallback(async () => {
+    setLoadError(null)
     try {
       const [settingsRes, statsRes, previewRes, historyRes] = await Promise.all([
         remindersApi.getSettings(),
@@ -73,12 +82,14 @@ export function AutomatedRemindersView() {
       setStats(statsRes)
       setPreview(previewRes)
       setHistory(historyRes.data || [])
-    } catch (err) {
-      console.error('Failed to load reminders data', err)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to load automated reminders configuration.')
+      setLoadError(msg)
+      toast.error(msg)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [toast])
 
   useEffect(() => {
     loadData()
@@ -88,6 +99,7 @@ export function AutomatedRemindersView() {
     if (!settings) return
     setSaving(true)
     setSaveMessage('')
+    setSaveError(null)
     try {
       const updated = await remindersApi.updateSettings({
         enabled: settings.enabled,
@@ -103,10 +115,13 @@ export function AutomatedRemindersView() {
       })
       setSettings({ ...updated, globalEnabled: settings.globalEnabled })
       setSaveMessage('Settings saved successfully!')
+      toast.success('Reminder preferences saved.')
       setTimeout(() => setSaveMessage(''), 3000)
       loadData()
-    } catch (err: any) {
-      alert(`Failed to save settings: ${err.message}`)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to save reminder preferences.')
+      setSaveError(msg)
+      toast.error(msg)
     } finally {
       setSaving(false)
     }
@@ -171,34 +186,45 @@ export function AutomatedRemindersView() {
   }
 
   const handleTriggerRun = async (dryRun: boolean) => {
-    if (!dryRun && !confirm('Are you sure you want to trigger live reminders dispatch for all eligible overdue accounts?')) {
+    if (runInFlightRef.current) return
+    if (!dryRun) {
+      setConfirmLiveRunOpen(true)
       return
     }
+    await executeTriggerRun(true)
+  }
+
+  const executeTriggerRun = async (dryRun: boolean) => {
+    if (runInFlightRef.current) return
+    runInFlightRef.current = true
     setRunning(true)
     setRunMessage(null)
     setScanError(null)
     try {
       const result = await remindersApi.triggerRun(dryRun)
       setPreview(result)
-      setRunMessage({
-        type: 'success',
-        text: `Reminder run completed! Evaluated: ${result.evaluatedCount} | Eligible: ${result.eligibleCount} | ${
-          result.isDryRun
-            ? `Simulated: ${result.dispatchedCount} (0 live messages sent)`
-            : `Dispatched: ${result.dispatchedCount}`
-        } | Suppressed: ${result.suppressedCount} (${result.isDryRun ? 'DRY-RUN SIMULATION' : 'LIVE DISPATCH'})`,
-      })
+      setConfirmLiveRunOpen(false)
+      const text = `Reminder run completed! Evaluated: ${result.evaluatedCount} | Eligible: ${result.eligibleCount} | ${
+        result.isDryRun
+          ? `Simulated: ${result.dispatchedCount} (0 live messages sent)`
+          : `Dispatched: ${result.dispatchedCount}`
+      } | Suppressed: ${result.suppressedCount} (${result.isDryRun ? 'DRY-RUN SIMULATION' : 'LIVE DISPATCH'})`
+      setRunMessage({ type: 'success', text })
+      toast.success(result.isDryRun ? 'Dry-run reminder evaluation finished.' : 'Reminder run finished.')
       const [historyRes, statsRes] = await Promise.all([
         remindersApi.getHistory({ limit: 10 }).catch(() => ({ data: [] })),
         remindersApi.getStats().catch(() => null),
       ])
       if (historyRes.data) setHistory(historyRes.data)
       if (statsRes) setStats(statsRes)
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.message || err.message || 'Trigger failed'
+    } catch (err: unknown) {
+      const errorMsg = extractSafeErrorMessage(err, 'Trigger failed')
       setRunMessage({ type: 'error', text: `Trigger failed: ${errorMsg}` })
+      setConfirmLiveRunOpen(false)
+      toast.error(errorMsg)
     } finally {
       setRunning(false)
+      runInFlightRef.current = false
     }
   }
 
@@ -233,6 +259,21 @@ export function AutomatedRemindersView() {
 
   return (
     <div className="space-y-6">
+      {loadError && (
+        <div
+          role="alert"
+          className="p-4 rounded-xl text-xs bg-rose-950/40 border border-rose-800 text-rose-300 flex items-center justify-between gap-3"
+        >
+          <span>⚠️ {loadError}</span>
+          <button
+            type="button"
+            onClick={loadData}
+            className="px-3 py-1 rounded bg-rose-800 hover:bg-rose-700 text-white font-semibold cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {/* ── Status & Safety Overview Banner ── */}
       <div
         className="rounded-2xl p-6"
@@ -396,8 +437,14 @@ export function AutomatedRemindersView() {
             <h3 className="text-sm font-semibold text-white">Reminder Automation Settings</h3>
             <p className="text-xs text-white/50 mt-0.5">Control channels, timing, quiet hours, and frequency boundaries</p>
           </div>
-          {saveMessage && <span className="text-xs text-emerald-400 font-medium">{saveMessage}</span>}
+          {saveMessage && <span role="status" className="text-xs text-emerald-400 font-medium">{saveMessage}</span>}
         </div>
+
+        {saveError && (
+          <div role="alert" className="p-3 rounded-xl text-xs bg-rose-950/40 border border-rose-800 text-rose-300">
+            ⚠️ {saveError}
+          </div>
+        )}
 
         {settings && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -853,16 +900,20 @@ export function AutomatedRemindersView() {
                               ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                               : h.status === 'SENT'
                                 ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                                : h.status === 'FAILED'
-                                  ? 'bg-red-500/20 text-red-300 border border-red-500/30'
-                                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                : h.status === 'SUPPRESSED'
+                                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                                  : h.status === 'FAILED'
+                                    ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                           }`}
                         >
                           {h.status}
                         </span>
                       </td>
                       <td className="py-3 px-3 text-white/50 text-[11px]">
-                        {h.failReason ? (
+                        {h.status === 'SUPPRESSED' ? (
+                          <span className="text-purple-300 font-medium">{payload?.suppressionReason || 'Suppressed by Consent Policy'}</span>
+                        ) : h.failReason ? (
                           <span className="text-red-400 font-medium">{h.failReason}</span>
                         ) : payload?.providerMessageId ? (
                           <span className="font-mono">{payload.providerMessageId.substring(0, 24)}...</span>
@@ -1060,6 +1111,17 @@ export function AutomatedRemindersView() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmLiveRunOpen}
+        title="Trigger Live Reminders Dispatch"
+        description="Are you sure you want to trigger live reminders dispatch for all eligible overdue accounts? Global safety flags on the server will still govern actual external delivery."
+        confirmLabel="Confirm Dispatch"
+        variant="warning"
+        loading={running}
+        onCancel={() => setConfirmLiveRunOpen(false)}
+        onConfirm={() => executeTriggerRun(false)}
+      />
     </div>
   )
 }

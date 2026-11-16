@@ -38,7 +38,7 @@ export const promptsApi = {
       .then((r) => r.data),
 
   downloadTxt: async (id: string, name: string) => {
-    const res = await apiClient.get(`/prompts/${id}/export`, {
+    const res = await apiClient.get(`/prompts/${id}/download`, {
       responseType: 'blob',
     })
     const blob = new Blob([res.data], { type: 'text/plain;charset=utf-8;' })

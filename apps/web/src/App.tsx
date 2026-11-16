@@ -1,10 +1,11 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { Suspense, lazy } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { Suspense, lazy, type ReactNode } from 'react'
 import { AppLayout } from './components/layout/AppLayout'
 import { SuperAdminLayout } from './components/layout/SuperAdminLayout'
 import { RequireAuth } from './components/auth/RequireAuth'
 import { RequireRole } from './components/auth/RequireRole'
 import { AuthProvider, useAuth } from './store/AuthContext'
+import { ToastProvider } from './store/ToastContext'
 import { ErrorBoundary } from './components/ui/ErrorBoundary'
 
 // Lazy-load tenant pages
@@ -18,6 +19,7 @@ const VoicePage = lazy(() => import('./pages/VoicePage'))
 const CallHistoryPage = lazy(() => import('./pages/CallHistoryPage'))
 const FollowUpPage = lazy(() => import('./pages/FollowUpPage'))
 const ReportsPage = lazy(() => import('./pages/ReportsPage'))
+const ProfilePage = lazy(() => import('./pages/ProfilePage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const IntelligencePage = lazy(() => import('./pages/IntelligencePage'))
 const VoicePromptsPage = lazy(() => import('./pages/VoicePromptsPage'))
@@ -47,12 +49,30 @@ function RootRedirect() {
   return <Navigate to="/dashboard" replace />
 }
 
+function RouteAwareErrorBoundary({ children }: { children: ReactNode }) {
+  const { user, isAuthenticated } = useAuth()
+  const location = useLocation()
+  const navigate = useNavigate()
+
+  return (
+    <ErrorBoundary
+      userRole={user?.role}
+      isAuthenticated={isAuthenticated}
+      currentPath={location.pathname}
+      onNavigate={(path) => navigate(path, { replace: true })}
+    >
+      {children}
+    </ErrorBoundary>
+  )
+}
+
 export default function App() {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Suspense fallback={<PageLoader />}>
-          <ErrorBoundary>
+    <ToastProvider>
+      <AuthProvider>
+        <BrowserRouter>
+          <Suspense fallback={<PageLoader />}>
+            <RouteAwareErrorBoundary>
             <Routes>
               {/* Public */}
               <Route path="/login" element={<LoginPage />} />
@@ -78,8 +98,17 @@ export default function App() {
                   <Route path="*" element={<Navigate to="/platform/overview" replace />} />
                 </Route>
 
-                {/* Tenant Application Layout for Admin, Manager, and Agent */}
-                <Route element={<AppLayout />}>
+                {/* Tenant Application Layout strictly isolated to Admin, Manager, and Agent */}
+                <Route
+                  element={
+                    <RequireRole
+                      allowedRoles={['ADMIN', 'MANAGER', 'AGENT']}
+                      redirectTo="/platform/overview"
+                    >
+                      <AppLayout />
+                    </RequireRole>
+                  }
+                >
                   <Route index element={<RootRedirect />} />
                   <Route path="/dashboard" element={<DashboardPage />} />
                   <Route path="/customers" element={<CustomersPage />} />
@@ -114,6 +143,7 @@ export default function App() {
                   <Route path="/calls" element={<CallHistoryPage />} />
                   <Route path="/follow-ups" element={<FollowUpPage />} />
                   <Route path="/reports" element={<ReportsPage />} />
+                  <Route path="/profile" element={<ProfilePage />} />
                   <Route
                     path="/settings"
                     element={
@@ -128,9 +158,10 @@ export default function App() {
               {/* Catch-all */}
               <Route path="*" element={<RootRedirect />} />
             </Routes>
-          </ErrorBoundary>
-        </Suspense>
-      </BrowserRouter>
-    </AuthProvider>
+            </RouteAwareErrorBoundary>
+          </Suspense>
+        </BrowserRouter>
+      </AuthProvider>
+    </ToastProvider>
   )
 }

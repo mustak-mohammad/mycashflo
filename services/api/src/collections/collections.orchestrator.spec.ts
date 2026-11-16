@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { CollectionsOrchestrator } from './collections.orchestrator.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { NotificationChannel } from '@prisma/client';
+import { NotificationChannel, ConsentState } from '@prisma/client';
 
 describe('CollectionsOrchestrator', () => {
   let orchestrator: CollectionsOrchestrator;
@@ -31,6 +31,9 @@ describe('CollectionsOrchestrator', () => {
         email: 'gupta@enterprises.in',
         notes: '',
         status: 'ACTIVE',
+        emailConsent: ConsentState.OPTED_IN,
+        whatsappConsent: ConsentState.OPTED_IN,
+        smsConsent: ConsentState.OPTED_IN,
       },
       {
         id: 'cust_dnd',
@@ -337,6 +340,191 @@ describe('CollectionsOrchestrator', () => {
       expect(mockNotifications.dispatch).not.toHaveBeenCalled();
       expect(cases.length).toBe(0); // No DB records created
       expect(tasks.length).toBe(0);
+    });
+  });
+
+  // ── 5. Phase 1C.1 Centralized Consent Policy & Accurate Suppression Counters ─
+  describe('Phase 1C.1 — Centralized Consent Policy & Accurate Suppression Counters', () => {
+    it('suppresses outreach and increments suppressedDnd when customer is UNKNOWN on channel', async () => {
+      customers.push({
+        id: 'cust_unknown_orch',
+        tenantId: 'tenant_orch_01',
+        name: 'Unknown Consent Corp',
+        phone: '+919876500001',
+        email: 'unknown@orch.in',
+        notes: '',
+        status: 'ACTIVE',
+        emailConsent: ConsentState.UNKNOWN,
+        whatsappConsent: ConsentState.UNKNOWN,
+      });
+
+      invoices.push({
+        id: 'inv_unk_orch',
+        number: 'INV-UNK-ORCH-01',
+        tenantId: 'tenant_orch_01',
+        customerId: 'cust_unknown_orch',
+        customer: customers[customers.length - 1],
+        amount: 30000,
+        outstanding: 30000,
+        dueDate: new Date(Date.now() - 20 * 86400000),
+        status: 'OPEN',
+        collectionCases: [],
+        paymentPromises: [],
+      });
+
+      const report = await orchestrator.orchestrate(mockUser);
+
+      expect(report.suppressedDnd).toBe(1);
+      expect(report.remindersDispatched).toBe(0);
+      expect(report.items[0].action).toBe('SUPPRESSED_DND');
+      expect(report.items[0].reason).toContain('consent state: UNKNOWN');
+      expect(mockNotifications.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('falls back to Email when WhatsApp is OPTED_OUT but Email is OPTED_IN', async () => {
+      customers.push({
+        id: 'cust_channel_fallback',
+        tenantId: 'tenant_orch_01',
+        name: 'Fallback Channel Corp',
+        phone: '+919876500002',
+        email: 'fallback@orch.in',
+        notes: '',
+        status: 'ACTIVE',
+        whatsappConsent: ConsentState.OPTED_OUT,
+        emailConsent: ConsentState.OPTED_IN,
+      });
+
+      invoices.push({
+        id: 'inv_fallback_orch',
+        number: 'INV-FALLBACK-01',
+        tenantId: 'tenant_orch_01',
+        customerId: 'cust_channel_fallback',
+        customer: customers[customers.length - 1],
+        amount: 45000,
+        outstanding: 45000,
+        dueDate: new Date(Date.now() - 25 * 86400000),
+        status: 'OPEN',
+        collectionCases: [],
+        paymentPromises: [],
+      });
+
+      const report = await orchestrator.orchestrate(mockUser);
+
+      expect(report.suppressedDnd).toBe(0);
+      expect(report.remindersDispatched).toBe(1);
+      expect(mockNotifications.dispatch).toHaveBeenCalledWith(
+        mockUser,
+        expect.objectContaining({
+          channel: NotificationChannel.EMAIL,
+          customerId: 'cust_channel_fallback',
+        }),
+      );
+    });
+
+    it('suppresses outreach when requested channel is explicitly OPTED_OUT', async () => {
+      customers.push({
+        id: 'cust_email_optout_orch',
+        tenantId: 'tenant_orch_01',
+        name: 'Email Optout Corp',
+        phone: '+919876500003',
+        email: 'emailoptout@orch.in',
+        notes: '',
+        status: 'ACTIVE',
+        whatsappConsent: ConsentState.OPTED_IN,
+        emailConsent: ConsentState.OPTED_OUT,
+      });
+
+      invoices.push({
+        id: 'inv_em_optout_orch',
+        number: 'INV-EM-OPTOUT-01',
+        tenantId: 'tenant_orch_01',
+        customerId: 'cust_email_optout_orch',
+        customer: customers[customers.length - 1],
+        amount: 25000,
+        outstanding: 25000,
+        dueDate: new Date(Date.now() - 10 * 86400000),
+        status: 'OPEN',
+        collectionCases: [],
+        paymentPromises: [],
+      });
+
+      const report = await orchestrator.orchestrate(mockUser, { channel: NotificationChannel.EMAIL });
+
+      expect(report.suppressedDnd).toBe(1);
+      expect(report.remindersDispatched).toBe(0);
+      expect(report.items[0].action).toBe('SUPPRESSED_DND');
+      expect(report.items[0].reason).toContain('explicitly opted out of EMAIL communications');
+      expect(mockNotifications.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('suppresses outreach when customer has ambiguous legacy DND record', async () => {
+      customers.push({
+        id: 'cust_ambig_orch',
+        tenantId: 'tenant_orch_01',
+        name: 'Ambiguous Notes Corp',
+        phone: '+919876500004',
+        email: 'ambig@orch.in',
+        notes: '[DND:NO_CONTACT - Requested on 2026-11-01T12:00:00Z]',
+        status: 'ACTIVE',
+        whatsappConsent: ConsentState.OPTED_IN,
+        emailConsent: ConsentState.OPTED_IN,
+      });
+
+      invoices.push({
+        id: 'inv_ambig_orch',
+        number: 'INV-AMBIG-ORCH-01',
+        tenantId: 'tenant_orch_01',
+        customerId: 'cust_ambig_orch',
+        customer: customers[customers.length - 1],
+        amount: 60000,
+        outstanding: 60000,
+        dueDate: new Date(Date.now() - 40 * 86400000),
+        status: 'OPEN',
+        collectionCases: [],
+        paymentPromises: [],
+      });
+
+      const report = await orchestrator.orchestrate(mockUser);
+
+      expect(report.suppressedDnd).toBe(1);
+      expect(report.remindersDispatched).toBe(0);
+      expect(report.items[0].reason).toContain('ambiguous historical DND/cease-contact record pending review');
+      expect(mockNotifications.dispatch).not.toHaveBeenCalled();
+    });
+
+    it('suppresses outreach when customer has global cease-contact directive', async () => {
+      customers.push({
+        id: 'cust_global_orch',
+        tenantId: 'tenant_orch_01',
+        name: 'Global Cease Corp',
+        phone: '+919876500005',
+        email: 'global@orch.in',
+        notes: 'Stop all communication and cease-contact on all outreach',
+        status: 'ACTIVE',
+        whatsappConsent: ConsentState.OPTED_IN,
+        emailConsent: ConsentState.OPTED_IN,
+      });
+
+      invoices.push({
+        id: 'inv_global_orch',
+        number: 'INV-GLOBAL-ORCH-01',
+        tenantId: 'tenant_orch_01',
+        customerId: 'cust_global_orch',
+        customer: customers[customers.length - 1],
+        amount: 80000,
+        outstanding: 80000,
+        dueDate: new Date(Date.now() - 50 * 86400000),
+        status: 'OPEN',
+        collectionCases: [],
+        paymentPromises: [],
+      });
+
+      const report = await orchestrator.orchestrate(mockUser);
+
+      expect(report.suppressedDnd).toBe(1);
+      expect(report.remindersDispatched).toBe(0);
+      expect(report.items[0].reason).toContain('explicit global cease-contact directive');
+      expect(mockNotifications.dispatch).not.toHaveBeenCalled();
     });
   });
 });

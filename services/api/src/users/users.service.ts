@@ -11,6 +11,7 @@ import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
 import { UpdateUserDto } from './dto/update-user.dto.js';
+import { assertStrongPassword } from '../common/password-policy.js';
 import { UserRole } from '@prisma/client';
 
 const BCRYPT_ROUNDS = 12;
@@ -67,6 +68,8 @@ export class UsersService {
     if (existingInTenant) {
       throw new ConflictException(`User with email '${cleanEmail}' already exists in this tenant`);
     }
+
+    assertStrongPassword(dto.password);
 
     const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     const role = dto.role ?? UserRole.AGENT;
@@ -160,7 +163,8 @@ export class UsersService {
     if (dto.name !== undefined) data.name = dto.name.trim();
     if (dto.role !== undefined) data.role = dto.role;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
-    if (dto.password) {
+    if (dto.password !== undefined) {
+      assertStrongPassword(dto.password);
       data.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     }
 

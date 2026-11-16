@@ -2,7 +2,12 @@ import { useState, useCallback } from 'react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useApi } from '../hooks/useApi'
 import { customersApi } from '../api/customers'
-import type { Customer } from '../types'
+import { voiceApi } from '../api/voice'
+import { invoicesApi } from '../api/invoices'
+import { useAuth } from '../store/AuthContext'
+import { useToast } from '../store/ToastContext'
+import { extractSafeApiError, extractSafeErrorMessage } from '../utils/safeError'
+import type { Customer, DocumentDeliveryRequest, ConsentState } from '../types'
 
 function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
@@ -19,10 +24,44 @@ function statusBadge(status: Customer['status']) {
   )
 }
 
+function consentBadge(channel: 'Email' | 'WhatsApp' | 'SMS' | 'Voice', consent?: ConsentState) {
+  if (consent === 'OPTED_IN') {
+    return (
+      <span
+        key={channel}
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-950/70 text-emerald-300 border border-emerald-800/80"
+        title={`${channel}: Opted in (Consent granted)`}
+      >
+        <span className="text-[9px]">✓</span> {channel}
+      </span>
+    )
+  }
+  if (consent === 'OPTED_OUT') {
+    return (
+      <span
+        key={channel}
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-rose-950/70 text-rose-300 border border-rose-800/80"
+        title={`${channel}: Opted out (Cease contact)`}
+      >
+        <span className="text-[9px]">✕</span> {channel}
+      </span>
+    )
+  }
+  return (
+    <span
+      key={channel}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-800/80 text-slate-400 border border-slate-700/80"
+      title={`${channel}: Unknown consent (Outreach suppressed)`}
+    >
+      <span className="text-[9px]">?</span> {channel}
+    </span>
+  )
+}
+
 function Skeleton() {
   return (
     <tr>
-      {Array.from({ length: 6 }).map((_, i) => (
+      {Array.from({ length: 7 }).map((_, i) => (
         <td key={i} className="px-5 py-3.5">
           <div className="h-4 rounded animate-pulse" style={{ background: 'var(--surface-2)', width: '70%' }} />
         </td>
@@ -32,9 +71,13 @@ function Skeleton() {
 }
 
 export default function CustomersPage() {
+  const { user } = useAuth()
+  const canManageCustomers = user?.role === 'ADMIN' || user?.role === 'MANAGER'
+  const toast = useToast()
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [actionError, setActionError] = useState<string | null>(null)
   const limit = 20
 
   // Modal State
@@ -47,8 +90,34 @@ export default function CustomersPage() {
   const [formReference, setFormReference] = useState('')
   const [formGstin, setFormGstin] = useState('')
   const [formAddress, setFormAddress] = useState('')
+  const [formEmailConsent, setFormEmailConsent] = useState<ConsentState>('UNKNOWN')
+  const [formWhatsappConsent, setFormWhatsappConsent] = useState<ConsentState>('UNKNOWN')
+  const [formSmsConsent, setFormSmsConsent] = useState<ConsentState>('UNKNOWN')
+  const [formVoiceConsent, setFormVoiceConsent] = useState<ConsentState>('UNKNOWN')
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+
+  // Customer Document Deliveries Modal State
+  const [activeDeliveriesCustomer, setActiveDeliveriesCustomer] = useState<Customer | null>(null)
+  const [customerDeliveryRequests, setCustomerDeliveryRequests] = useState<DocumentDeliveryRequest[]>([])
+  const [loadingCustomerDeliveries, setLoadingCustomerDeliveries] = useState(false)
+  const [customerDeliveriesError, setCustomerDeliveriesError] = useState<string | null>(null)
+  const [copiedCustomerLinkId, setCopiedCustomerLinkId] = useState<string | null>(null)
+  const [downloadingCustPdfId, setDownloadingCustPdfId] = useState<string | null>(null)
+
+  const handleOpenCustomerDeliveries = async (customer: Customer) => {
+    setActiveDeliveriesCustomer(customer)
+    setLoadingCustomerDeliveries(true)
+    setCustomerDeliveriesError(null)
+    try {
+      const res = await voiceApi.getDocumentDeliveryRequests({ customerId: customer.id })
+      setCustomerDeliveryRequests(res.data || [])
+    } catch (err: any) {
+      setCustomerDeliveriesError(err?.message || 'Failed to load customer delivery activity')
+    } finally {
+      setLoadingCustomerDeliveries(false)
+    }
+  }
 
   const fetcher = useCallback(
     () => customersApi.list({ page, limit, search: search || undefined }),
@@ -68,6 +137,10 @@ export default function CustomersPage() {
     setFormReference('')
     setFormGstin('')
     setFormAddress('')
+    setFormEmailConsent('UNKNOWN')
+    setFormWhatsappConsent('UNKNOWN')
+    setFormSmsConsent('UNKNOWN')
+    setFormVoiceConsent('UNKNOWN')
     setFormError(null)
     setIsModalOpen(true)
   }
@@ -81,6 +154,10 @@ export default function CustomersPage() {
     setFormReference((c as any).customerReference || '')
     setFormGstin((c as any).gstNumber || '')
     setFormAddress((c as any).billingAddress || '')
+    setFormEmailConsent(c.emailConsent || 'UNKNOWN')
+    setFormWhatsappConsent(c.whatsappConsent || 'UNKNOWN')
+    setFormSmsConsent(c.smsConsent || 'UNKNOWN')
+    setFormVoiceConsent(c.voiceConsent || 'UNKNOWN')
     setFormError(null)
     setIsModalOpen(true)
   }
@@ -95,6 +172,20 @@ export default function CustomersPage() {
     setFormError(null)
     try {
       if (editingCustomer) {
+        const consentPayload: any = {}
+        if (formEmailConsent !== (editingCustomer.emailConsent || 'UNKNOWN')) {
+          consentPayload.emailConsent = formEmailConsent
+        }
+        if (formWhatsappConsent !== (editingCustomer.whatsappConsent || 'UNKNOWN')) {
+          consentPayload.whatsappConsent = formWhatsappConsent
+        }
+        if (formSmsConsent !== (editingCustomer.smsConsent || 'UNKNOWN')) {
+          consentPayload.smsConsent = formSmsConsent
+        }
+        if (formVoiceConsent !== (editingCustomer.voiceConsent || 'UNKNOWN')) {
+          consentPayload.voiceConsent = formVoiceConsent
+        }
+
         await customersApi.update(editingCustomer.id, {
           name: formName.trim(),
           phone: formPhone.trim(),
@@ -103,6 +194,7 @@ export default function CustomersPage() {
           customerReference: formReference.trim() || undefined,
           gstNumber: formGstin.trim().toUpperCase() || undefined,
           billingAddress: formAddress.trim() || undefined,
+          ...consentPayload,
         })
       } else {
         await customersApi.create({
@@ -113,17 +205,19 @@ export default function CustomersPage() {
           customerReference: formReference.trim() || undefined,
           gstNumber: formGstin.trim().toUpperCase() || undefined,
           billingAddress: formAddress.trim() || undefined,
+          emailConsent: formEmailConsent,
+          whatsappConsent: formWhatsappConsent,
+          smsConsent: formSmsConsent,
+          voiceConsent: formVoiceConsent,
         })
       }
+      toast.success(editingCustomer ? 'Customer updated.' : 'Customer added.')
       setIsModalOpen(false)
       setRefreshKey((k) => k + 1)
-    } catch (err: any) {
-      const msg = err.response?.data?.message
-        ? Array.isArray(err.response.data.message)
-          ? err.response.data.message.join(' • ')
-          : String(err.response.data.message)
-        : err.message || 'Failed to save customer.'
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to save customer.')
       setFormError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
@@ -135,13 +229,15 @@ export default function CustomersPage() {
         title="Customers"
         subtitle={`${data?.total ?? '…'} total customer accounts`}
         action={
-          <button
-            type="button"
-            onClick={handleOpenCreate}
-            className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer"
-          >
-            + Add Customer
-          </button>
+          canManageCustomers ? (
+            <button
+              type="button"
+              onClick={handleOpenCreate}
+              className="px-4 py-2 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer"
+            >
+              + Add Customer
+            </button>
+          ) : undefined
         }
       />
 
@@ -159,9 +255,9 @@ export default function CustomersPage() {
           {loading && <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Loading…</span>}
         </div>
 
-        {error && (
-          <div className="px-5 py-3 text-sm" style={{ color: 'var(--danger)' }}>
-            ⚠️ {error}
+        {(error || actionError) && (
+          <div role="alert" className="px-5 py-3 text-sm" style={{ color: 'var(--danger)' }}>
+            ⚠️ {actionError || error}
           </div>
         )}
 
@@ -169,7 +265,7 @@ export default function CustomersPage() {
           <table className="w-full text-sm">
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                {['Name & Ref', 'Contact Details', 'Company & GSTIN', 'Outstanding', 'Status', 'Actions'].map((h) => (
+                {['Name & Ref', 'Contact Details', 'Consent Preferences', 'Company & GSTIN', 'Outstanding', 'Status', 'Actions'].map((h) => (
                   <th key={h} className="px-5 py-3 text-left text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
                     {h}
                   </th>
@@ -181,7 +277,7 @@ export default function CustomersPage() {
                 Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} />)
               ) : !data?.data?.length ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                  <td colSpan={7} className="px-5 py-10 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
                     {search ? `No customers match "${search}"` : 'No customers yet.'}
                   </td>
                 </tr>
@@ -200,6 +296,24 @@ export default function CustomersPage() {
                       <div>{c.phone}</div>
                       {c.email && <div className="text-xs">{c.email}</div>}
                     </td>
+                    <td className="px-5 py-3.5">
+                      <div className="flex flex-wrap gap-1 items-center">
+                        {consentBadge('Email', c.emailConsent)}
+                        {consentBadge('WhatsApp', c.whatsappConsent)}
+                        {consentBadge('SMS', c.smsConsent)}
+                        {consentBadge('Voice', c.voiceConsent)}
+                      </div>
+                      {c.notes && (c.notes.includes('DND') || c.notes.includes('NO_CONTACT') || c.notes.includes('OPT_OUT')) && (
+                        <div className="mt-1">
+                          <span
+                            className="inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-950/60 text-amber-300 border border-amber-800/60"
+                            title={c.notes}
+                          >
+                            Legacy DND
+                          </span>
+                        </div>
+                      )}
+                    </td>
                     <td className="px-5 py-3.5" style={{ color: 'var(--text-muted)' }}>
                       <div>{c.company || '—'}</div>
                       {(c as any).gstNumber && (
@@ -211,13 +325,25 @@ export default function CustomersPage() {
                     </td>
                     <td className="px-5 py-3.5">{statusBadge(c.status)}</td>
                     <td className="px-5 py-3.5">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEdit(c)}
-                        className="px-2.5 py-1 text-xs rounded hover:bg-white/10 text-indigo-300 hover:text-white cursor-pointer"
-                      >
-                        Edit
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCustomerDeliveries(c)}
+                          title="View customer invoice & payment-link delivery history"
+                          className="px-2.5 py-1 text-xs rounded font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer flex items-center gap-1 transition-colors"
+                        >
+                          <span>📬</span> Deliveries
+                        </button>
+                        {canManageCustomers && (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(c)}
+                            className="px-2.5 py-1 text-xs rounded hover:bg-white/10 text-indigo-300 hover:text-white cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -249,7 +375,7 @@ export default function CustomersPage() {
       </div>
 
       {/* Add / Edit Customer Modal */}
-      {isModalOpen && (
+      {canManageCustomers && isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
           <div
             className="w-full max-w-lg rounded-2xl overflow-hidden shadow-2xl flex flex-col"
@@ -353,6 +479,68 @@ export default function CustomersPage() {
                     className="w-full p-2.5 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 resize-none"
                   />
                 </div>
+
+                <div className="col-span-2 pt-3 border-t border-white/10">
+                  <div className="text-white/90 font-medium mb-1 flex items-center justify-between">
+                    <span>Communication Channel Consent</span>
+                    <span className="text-[10px] text-amber-400 font-normal">
+                      Role-restricted (Admin/Manager)
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-white/50 mb-3">
+                    Outreach is suppressed when state is <strong>UNKNOWN</strong> or <strong>OPTED_OUT</strong>. Explicit opt-in is required for outreach.
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    <div>
+                      <label className="block text-white/70 mb-1">Email Consent</label>
+                      <select
+                        value={formEmailConsent}
+                        onChange={(e) => setFormEmailConsent(e.target.value as ConsentState)}
+                        className="w-full p-2 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="UNKNOWN">UNKNOWN (Suppressed)</option>
+                        <option value="OPTED_IN">OPTED_IN (Consent Granted)</option>
+                        <option value="OPTED_OUT">OPTED_OUT (Cease Contact)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-white/70 mb-1">WhatsApp Consent</label>
+                      <select
+                        value={formWhatsappConsent}
+                        onChange={(e) => setFormWhatsappConsent(e.target.value as ConsentState)}
+                        className="w-full p-2 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="UNKNOWN">UNKNOWN (Suppressed)</option>
+                        <option value="OPTED_IN">OPTED_IN (Consent Granted)</option>
+                        <option value="OPTED_OUT">OPTED_OUT (Cease Contact)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-white/70 mb-1">SMS Consent</label>
+                      <select
+                        value={formSmsConsent}
+                        onChange={(e) => setFormSmsConsent(e.target.value as ConsentState)}
+                        className="w-full p-2 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="UNKNOWN">UNKNOWN (Suppressed)</option>
+                        <option value="OPTED_IN">OPTED_IN (Consent Granted)</option>
+                        <option value="OPTED_OUT">OPTED_OUT (Cease Contact)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-white/70 mb-1">Voice Consent</label>
+                      <select
+                        value={formVoiceConsent}
+                        onChange={(e) => setFormVoiceConsent(e.target.value as ConsentState)}
+                        className="w-full p-2 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 text-xs"
+                      >
+                        <option value="UNKNOWN">UNKNOWN (Suppressed)</option>
+                        <option value="OPTED_IN">OPTED_IN (Consent Granted)</option>
+                        <option value="OPTED_OUT">OPTED_OUT (Cease Contact)</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
@@ -372,6 +560,175 @@ export default function CustomersPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Customer Document Delivery Activity Modal */}
+      {activeDeliveriesCustomer && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/80">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>📬</span> Document Delivery Activity: {activeDeliveriesCustomer.name}
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Phone: <strong className="text-white font-mono">{activeDeliveriesCustomer.phone}</strong> • Email: <strong className="text-white">{activeDeliveriesCustomer.email || '—'}</strong>
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-950 text-amber-300 border border-amber-800 flex items-center gap-1">
+                  <span>🧪</span> Simulation Mode
+                </span>
+                <button
+                  onClick={() => setActiveDeliveriesCustomer(null)}
+                  className="text-slate-400 hover:text-white text-lg p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4 overflow-y-auto text-xs text-slate-300">
+              {customerDeliveriesError && (
+                <div className="p-3 rounded-lg bg-rose-950/40 border border-rose-800 text-rose-300">
+                  ⚠️ {customerDeliveriesError}
+                </div>
+              )}
+
+              {loadingCustomerDeliveries ? (
+                <div className="py-12 text-center text-slate-400 flex flex-col items-center gap-2">
+                  <div className="animate-spin text-2xl">⏳</div>
+                  <div>Loading customer delivery activity…</div>
+                </div>
+              ) : customerDeliveryRequests.length === 0 ? (
+                <div className="py-10 text-center text-slate-400 bg-slate-950/40 rounded-xl border border-slate-800 p-6">
+                  <div className="text-2xl mb-2">📭</div>
+                  <div className="font-semibold text-slate-300">No document delivery records found</div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    When this customer requests an invoice or payment link during a Chotu voice session, records of those requests and delivery attempts will appear here.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {customerDeliveryRequests.map((req) => (
+                    <div key={req.id} className="p-4 rounded-xl bg-slate-950/60 border border-slate-800 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-indigo-950 text-indigo-300 border border-indigo-800">
+                            {req.requestType === 'BOTH' ? 'Invoice & Payment Link' : req.requestType === 'PAYMENT_LINK' ? 'Payment Link' : 'Invoice Copy'}
+                          </span>
+                          {req.invoice && (
+                            <span className="font-mono text-white text-[11px] font-medium">
+                              ({req.invoice.number})
+                            </span>
+                          )}
+                          <span className="text-slate-400 text-[11px]">
+                            by <span className="text-slate-200 font-mono">{req.requestedBy}</span>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-400 text-[11px] font-mono">
+                            {new Date(req.requestedAt).toLocaleString()}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                            req.status === 'COMPLETED'
+                              ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                              : req.status === 'PARTIAL_SUCCESS'
+                              ? 'bg-amber-950 text-amber-300 border-amber-800'
+                              : req.status === 'FAILED'
+                              ? 'bg-rose-950 text-rose-300 border-rose-800'
+                              : 'bg-slate-800 text-slate-300 border-slate-700'
+                          }`}>
+                            {req.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Delivery attempts */}
+                      {req.attempts && req.attempts.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                            Channel Attempts:
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {req.attempts.map((att) => (
+                              <div key={att.id} className="p-2 rounded bg-slate-900 border border-slate-800 flex items-center justify-between text-[11px]">
+                                <div className="flex items-center gap-1.5">
+                                  <span>{att.channel === 'WHATSAPP' ? '💬' : '✉️'}</span>
+                                  <span className="font-semibold text-slate-200">{att.channel}</span>
+                                  <span className="text-slate-400 font-mono text-[10px]">({att.destinationMasked})</span>
+                                </div>
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+                                  att.status === 'SIMULATED'
+                                    ? 'bg-amber-950 text-amber-300 border-amber-800'
+                                    : att.status === 'DELIVERED' || att.status === 'SENT'
+                                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                    : att.status === 'FAILED'
+                                    ? 'bg-rose-950 text-rose-300 border-rose-800'
+                                    : 'bg-slate-800 text-slate-300 border-slate-700'
+                                }`}>
+                                  {att.status === 'SIMULATED' ? '🧪 Sim' : att.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Action buttons inside delivery card */}
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800/80">
+                        {req.invoiceId && (
+                          <button
+                            onClick={async () => {
+                              try {
+                                setDownloadingCustPdfId(req.invoiceId)
+                                setCustomerDeliveriesError(null)
+                                await invoicesApi.downloadPdf(req.invoiceId, req.invoice?.number || req.invoiceId)
+                              } catch (err: unknown) {
+                                const msg = await extractSafeApiError(err, 'Failed to download invoice PDF.')
+                                setCustomerDeliveriesError(msg)
+                                setActionError(msg)
+                                toast.error(msg)
+                              } finally {
+                                setDownloadingCustPdfId(null)
+                              }
+                            }}
+                            disabled={downloadingCustPdfId === req.invoiceId}
+                            className="px-2.5 py-1 rounded text-xs font-semibold bg-indigo-950/70 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                          >
+                            <span>📄</span>
+                            {downloadingCustPdfId === req.invoiceId ? 'Downloading...' : 'Download Invoice PDF'}
+                          </button>
+                        )}
+                        {req.metadata?.paymentLinkUrl && (
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(req.metadata!.paymentLinkUrl!)
+                              setCopiedCustomerLinkId(req.id)
+                              setTimeout(() => setCopiedCustomerLinkId(null), 2000)
+                            }}
+                            className="px-2.5 py-1 rounded text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 cursor-pointer flex items-center gap-1"
+                          >
+                            <span>💳</span> {copiedCustomerLinkId === req.id ? '✓ Link Copied!' : 'Copy Payment Link'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 border-t border-slate-800 flex justify-end bg-slate-950">
+              <button
+                onClick={() => setActiveDeliveriesCustomer(null)}
+                className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-white cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}

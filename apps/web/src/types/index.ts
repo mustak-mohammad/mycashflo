@@ -34,6 +34,8 @@ export interface Paginated<T> {
   limit: number
 }
 
+export type ConsentState = 'UNKNOWN' | 'OPTED_IN' | 'OPTED_OUT';
+
 export interface Customer {
   id: string
   name: string
@@ -43,8 +45,21 @@ export interface Customer {
   outstandingBalance: number
   currency: string
   status: 'ACTIVE' | 'INACTIVE'
+  notes?: string
   createdAt: string
   tenantId: string
+  emailConsent?: ConsentState
+  emailConsentAt?: string
+  emailConsentSource?: string
+  whatsappConsent?: ConsentState
+  whatsappConsentAt?: string
+  whatsappConsentSource?: string
+  smsConsent?: ConsentState
+  smsConsentAt?: string
+  smsConsentSource?: string
+  voiceConsent?: ConsentState
+  voiceConsentAt?: string
+  voiceConsentSource?: string
 }
 
 export interface Invoice {

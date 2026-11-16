@@ -3,7 +3,7 @@ import { NotificationsService } from './notifications.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { NotificationChannel, NotifStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
+import { NotificationChannel, NotifStatus, PaymentMethod, PaymentStatus, ConsentState } from '@prisma/client';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
 describe('NotificationsService', () => {
@@ -18,13 +18,37 @@ describe('NotificationsService', () => {
     role: 'ADMIN',
   };
 
+  const optedInCustomer = (overrides: any = {}) => ({
+    id: 'cust_1',
+    name: 'Raj Enterprises',
+    phone: '+91 98765 43210',
+    email: 'billing@rajent.in',
+    notes: 'Standard enterprise client',
+    emailConsent: ConsentState.OPTED_IN,
+    whatsappConsent: ConsentState.OPTED_IN,
+    smsConsent: ConsentState.OPTED_IN,
+    ...overrides,
+  });
+
   beforeEach(() => {
     mockPrisma = {
       customer: {
-        findFirst: vi.fn(),
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'cust_1',
+          name: 'Raj Enterprises',
+          phone: '+91 98765 43210',
+          email: 'billing@rajent.in',
+          notes: 'Standard enterprise client',
+          emailConsent: ConsentState.OPTED_IN,
+          whatsappConsent: ConsentState.OPTED_IN,
+          smsConsent: ConsentState.OPTED_IN,
+        }),
       },
       tenant: {
-        findUnique: vi.fn(),
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'tenant_1',
+          name: 'Demo Corp Pvt Ltd',
+        }),
       },
       notification: {
         create: vi.fn(),
@@ -69,6 +93,16 @@ describe('NotificationsService', () => {
         verifyWebhookSignature: vi.fn().mockReturnValue(true),
         parseWebhook: vi.fn().mockReturnValue([]),
       },
+      sms: {
+        send: vi.fn().mockResolvedValue({
+          messageId: 'sms_live_123',
+          provider: 'SMS_GATEWAY',
+          status: 'SENT',
+          isSimulated: false,
+        }),
+        verifyWebhookSignature: vi.fn().mockReturnValue(true),
+        parseWebhook: vi.fn().mockReturnValue([]),
+      },
       getRawConfig: vi.fn().mockImplementation(async (tenantId: string, provider: string) => {
         if (provider === 'COMPANY_PROFILE') return { phone: '+919876500000' };
         return {};
@@ -106,13 +140,7 @@ describe('NotificationsService', () => {
 
   describe('Multi-Channel Dispatch & Real Email Delivery', () => {
     it('dispatches an EMAIL notification via Resend adapter and persists providerMessageId', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
-        id: 'cust_1',
-        name: 'Raj Enterprises',
-        phone: '+91 98765 43210',
-        email: 'billing@rajent.in',
-        notes: 'Standard enterprise client',
-      });
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer());
       mockPrisma.tenant.findUnique.mockResolvedValue({
         id: 'tenant_1',
         name: 'Demo Corp Pvt Ltd',
@@ -164,12 +192,12 @@ describe('NotificationsService', () => {
     });
 
     it('marks notification as FAILED if customer has invalid channel contact info', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_2',
         name: 'No Phone Corp',
         phone: '',
         email: 'test@corp.com',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({
@@ -189,12 +217,12 @@ describe('NotificationsService', () => {
     });
 
     it('marks email as FAILED if customer has invalid or missing email address', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_no_email',
         name: 'No Email Corp',
         phone: '+91 99999 88888',
         email: 'invalid-email-address',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({
@@ -241,11 +269,11 @@ describe('NotificationsService', () => {
 
   describe('Idempotency & Duplicate-Send Protection', () => {
     it('returns existing notification without re-sending when idempotencyKey matches', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Raj Enterprises',
         email: 'billing@rajent.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
 
       const existingRecord = {
@@ -272,11 +300,11 @@ describe('NotificationsService', () => {
     });
 
     it('returns existing notification when an overdue reminder for same invoice was sent in last 24h', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Raj Enterprises',
         email: 'billing@rajent.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
 
       // No match for idempotencyKey, but match for 24h duplicate invoice
@@ -306,11 +334,11 @@ describe('NotificationsService', () => {
 
   describe('Verified Invoice & Approved Payment Link Lookup', () => {
     it('reads verified invoice data and approved payment link without mutating payment records', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Raj Enterprises',
         email: 'billing@rajent.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
       mockPrisma.notification.findFirst.mockResolvedValue(null);
 
@@ -354,11 +382,11 @@ describe('NotificationsService', () => {
     });
 
     it('throws NotFoundException if invoiceId belongs to a different tenant', async () => {
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Raj Enterprises',
         email: 'billing@rajent.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
       mockPrisma.notification.findFirst.mockResolvedValue(null);
 
@@ -1053,7 +1081,7 @@ describe('NotificationsService', () => {
           customerId: 'cust_1',
           outstanding: 50000,
           dueDate: pastDate,
-          customer: { id: 'cust_1', name: 'Raj Enterprises', phone: '+91 98765 43210', email: 'billing@raj.in' },
+          customer: { id: 'cust_1', name: 'Raj Enterprises', phone: '+91 98765 43210', email: 'billing@raj.in', whatsappConsent: ConsentState.OPTED_IN },
         },
       ]);
       mockPrisma.customer.findFirst.mockResolvedValue({
@@ -1061,6 +1089,7 @@ describe('NotificationsService', () => {
         name: 'Raj Enterprises',
         phone: '+91 98765 43210',
         email: 'billing@raj.in',
+        whatsappConsent: ConsentState.OPTED_IN,
       });
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp' });
       mockPrisma.invoice.findFirst.mockResolvedValue({
@@ -1159,12 +1188,12 @@ describe('NotificationsService', () => {
         if (provider === 'COMPANY_PROFILE') return { phone: '+919618954429' };
         return {};
       });
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Sharma Logistics',
         phone: '+91 98765 43210',
         email: 'sharma@logistics.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'notif_wa_success', ...data }),
@@ -1195,11 +1224,11 @@ describe('NotificationsService', () => {
 
     it('fails safely without calling WhatsApp adapter when tenant contact number is missing', async () => {
       mockIntegrations.getRawConfig.mockResolvedValue({}); // No contact configured
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Sharma Logistics',
         phone: '+91 98765 43210',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'notif_wa_fail', ...data }),
@@ -1225,11 +1254,11 @@ describe('NotificationsService', () => {
       mockIntegrations.getRawConfig.mockImplementation(async () => ({
         phone: '+919876543210', // Same as customer phone
       }));
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Sharma Logistics',
         phone: '+91 98765 43210',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'notif_wa_same', ...data }),
@@ -1253,12 +1282,12 @@ describe('NotificationsService', () => {
 
     it('allows non-WhatsApp channels and other templates to succeed without companyContactNumber', async () => {
       mockIntegrations.getRawConfig.mockResolvedValue({}); // No contact number configured
-      mockPrisma.customer.findFirst.mockResolvedValue({
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
         id: 'cust_1',
         name: 'Sharma Logistics',
         phone: '+91 98765 43210',
         email: 'sharma@logistics.in',
-      });
+      }));
       mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
       mockPrisma.notification.create.mockImplementation(({ data }: any) =>
         Promise.resolve({ id: 'notif_email_ok', ...data }),
@@ -1289,6 +1318,400 @@ describe('NotificationsService', () => {
         },
       });
       expect(upcomingNotif.status).not.toBe(NotifStatus.FAILED);
+    });
+
+    it('persists FAILED and failure reason when WhatsApp adapter dispatch fails (e.g. Meta API 4xx/5xx)', async () => {
+      mockIntegrations.getRawConfig.mockImplementation(async (tenantId: string, provider: string) => {
+        if (provider === 'COMPANY_PROFILE') return { phone: '+919618954429' };
+        return {};
+      });
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
+        id: 'cust_1',
+        name: 'Sharma Logistics',
+        phone: '+91 98765 43210',
+        email: 'sharma@logistics.in',
+      }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_wa_failed', ...data }),
+      );
+
+      mockIntegrations.whatsapp.send.mockResolvedValue({
+        messageId: 'wamid.failed.12345',
+        provider: 'WHATSAPP_CLOUD',
+        status: 'FAILED',
+        isSimulated: false,
+        error: 'WhatsApp Cloud API returned 404 (code: 132001): Template name does not exist',
+      });
+
+      const notif = await service.dispatch(mockUser, {
+        customerId: 'cust_1',
+        channel: NotificationChannel.WHATSAPP,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceNumber: 'INV-2026-FAIL',
+          amount: 50000,
+          dueDate: '2026-10-15',
+        },
+      });
+
+      expect(notif.status).toBe(NotifStatus.FAILED);
+      expect(notif.failReason).toContain('Template name does not exist');
+      expect(notif.sentAt).toBeNull();
+      expect((notif.payload as any)?.failReason).toContain('Template name does not exist');
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: NotifStatus.FAILED,
+            failReason: expect.stringContaining('Template name does not exist'),
+            sentAt: null,
+          }),
+        }),
+      );
+    });
+
+    it('persists FAILED and failure reason when Email delivery is disabled by safety policy', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
+        id: 'cust_1',
+        name: 'Sharma Logistics',
+        phone: '+91 98765 43210',
+        email: 'sharma@logistics.in',
+      }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_email_disabled', ...data }),
+      );
+
+      mockIntegrations.email.send.mockResolvedValue({
+        messageId: 'msg_disabled_12345',
+        provider: 'RESEND',
+        status: 'FAILED',
+        isSimulated: true,
+        error: 'Email delivery is disabled by safety policy (EMAIL_DELIVERY_ENABLED is false)',
+      });
+
+      const notif = await service.dispatch(mockUser, {
+        customerId: 'cust_1',
+        channel: NotificationChannel.EMAIL,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceNumber: 'INV-2026-EMAIL-OFF',
+          amount: 25000,
+          dueDate: '2026-10-15',
+        },
+      });
+
+      expect(notif.status).toBe(NotifStatus.FAILED);
+      expect(notif.failReason).toContain('disabled by safety policy');
+      expect(notif.sentAt).toBeNull();
+      expect((notif.payload as any)?.failReason).toContain('disabled by safety policy');
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: NotifStatus.FAILED,
+            failReason: expect.stringContaining('disabled by safety policy'),
+            sentAt: null,
+          }),
+        }),
+      );
+    });
+
+    it('persists FAILED and failure reason when SMS delivery is disabled', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
+        id: 'cust_1',
+        name: 'Sharma Logistics',
+        phone: '+91 98765 43210',
+        email: 'sharma@logistics.in',
+      }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_sms_disabled', ...data }),
+      );
+
+      mockIntegrations.sms.send.mockResolvedValue({
+        messageId: 'sms_disabled_12345',
+        provider: 'SMS_GATEWAY',
+        status: 'FAILED',
+        isSimulated: true,
+        error: 'SMS delivery is disabled by safety policy (SMS_DELIVERY_ENABLED is false)',
+      });
+
+      const notif = await service.dispatch(mockUser, {
+        customerId: 'cust_1',
+        channel: NotificationChannel.SMS,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceNumber: 'INV-2026-SMS-OFF',
+          amount: 15000,
+          dueDate: '2026-10-15',
+        },
+      });
+
+      expect(notif.status).toBe(NotifStatus.FAILED);
+      expect(notif.failReason).toContain('SMS delivery is disabled');
+      expect(notif.sentAt).toBeNull();
+      expect(mockIntegrations.sms.send).toHaveBeenCalled();
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: NotifStatus.FAILED,
+            failReason: expect.stringContaining('SMS delivery is disabled'),
+            sentAt: null,
+          }),
+        }),
+      );
+    });
+
+    it('persists FAILED and failure reason when SMS provider credentials are missing', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
+        id: 'cust_1',
+        name: 'Sharma Logistics',
+        phone: '+91 98765 43210',
+        email: 'sharma@logistics.in',
+      }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_sms_no_creds', ...data }),
+      );
+
+      mockIntegrations.sms.send.mockResolvedValue({
+        messageId: 'sms_no_creds_12345',
+        provider: 'TWILIO',
+        status: 'FAILED',
+        isSimulated: false,
+        error: 'SMS provider credentials are missing (accountSid and authToken required)',
+      });
+
+      const notif = await service.dispatch(mockUser, {
+        customerId: 'cust_1',
+        channel: NotificationChannel.SMS,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceNumber: 'INV-2026-SMS-NOCREDS',
+          amount: 15000,
+          dueDate: '2026-10-15',
+        },
+      });
+
+      expect(notif.status).toBe(NotifStatus.FAILED);
+      expect(notif.failReason).toContain('credentials are missing');
+      expect(notif.sentAt).toBeNull();
+    });
+
+    it('persists SENT and valid sentAt timestamp when live SMS provider succeeds', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({
+        id: 'cust_1',
+        name: 'Sharma Logistics',
+        phone: '+91 98765 43210',
+        email: 'sharma@logistics.in',
+      }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo Finance' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_sms_sent', ...data }),
+      );
+
+      mockIntegrations.sms.send.mockResolvedValue({
+        messageId: 'sms_live_88888',
+        provider: 'TWILIO',
+        status: 'SENT',
+        isSimulated: false,
+      });
+
+      const notif = await service.dispatch(mockUser, {
+        customerId: 'cust_1',
+        channel: NotificationChannel.SMS,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceNumber: 'INV-2026-SMS-SENT',
+          amount: 15000,
+          dueDate: '2026-10-15',
+        },
+      });
+
+      expect(notif.status).toBe(NotifStatus.SENT);
+      expect(notif.failReason).toBeNull();
+      expect(notif.sentAt).toBeInstanceOf(Date);
+      expect(mockPrisma.notification.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: NotifStatus.SENT,
+            sentAt: expect.any(Date),
+            failReason: null,
+          }),
+        }),
+      );
+    });
+
+    it('increments failedCount and does not increment dispatchedCount for non-delivery states in automated reminders', async () => {
+      const overdueInvoice = {
+        id: 'inv_overdue_1',
+        number: 'INV-FAIL-COUNT',
+        customerId: 'cust_1',
+        outstanding: 25000,
+        dueDate: new Date(Date.now() - 35 * 24 * 3600 * 1000), // 35 days overdue -> WHATSAPP
+        customer: { name: 'Late Payer Inc', whatsappConsent: ConsentState.OPTED_IN },
+      };
+      mockPrisma.invoice.findMany.mockResolvedValue([overdueInvoice]);
+      mockPrisma.invoice.findFirst.mockResolvedValue(overdueInvoice);
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_1',
+        name: 'Late Payer Inc',
+        phone: '+91 98765 43210',
+        email: 'late@payer.in',
+        whatsappConsent: ConsentState.OPTED_IN,
+      });
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'myCashflo' });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_fail_count', ...data }),
+      );
+
+      // WhatsApp adapter fails
+      mockIntegrations.whatsapp.send.mockResolvedValue({
+        messageId: 'wamid.failed.count',
+        provider: 'WHATSAPP_CLOUD',
+        status: 'FAILED',
+        isSimulated: false,
+        error: 'Rate limit exceeded',
+      });
+
+      const results = await service.triggerAutomatedReminders(mockUser);
+
+      expect(results.evaluatedInvoices).toBe(1);
+      expect(results.failedCount).toBe(1);
+      expect(results.dispatchedCount).toBe(0);
+      expect(results.details[0].status).toBe(NotifStatus.FAILED);
+    });
+  });
+
+  describe('Structured Customer Consent & SUPPRESSED Status (Phase 1C)', () => {
+    it('blocks manual dispatch and throws BadRequestException when customer consent is UNKNOWN', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_unknown',
+        name: 'Unknown Consent Corp',
+        email: 'unknown@corp.in',
+        phone: '+91 98765 43210',
+        emailConsent: ConsentState.UNKNOWN,
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_unknown',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('blocks manual dispatch and throws BadRequestException when customer consent is OPTED_OUT', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_optout_wa',
+        name: 'WhatsApp OptOut Corp',
+        phone: '+91 98765 43210',
+        email: 'wa@corp.in',
+        whatsappConsent: ConsentState.OPTED_OUT,
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_optout_wa',
+          channel: NotificationChannel.WHATSAPP,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.whatsapp.send).not.toHaveBeenCalled();
+    });
+
+    it('persists SUPPRESSED notification with sentAt null and suppressionReason when persistSuppressed is true', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_suppressed',
+        name: 'Suppressed Corp',
+        phone: '+91 98765 43210',
+        smsConsent: ConsentState.OPTED_OUT,
+      });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_suppressed_1', ...data }),
+      );
+
+      const result = await service.dispatch(mockUser, {
+        customerId: 'cust_suppressed',
+        channel: NotificationChannel.SMS,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          persistSuppressed: true,
+          invoiceNumber: 'INV-SUP-01',
+        },
+      });
+
+      expect(result.status).toBe(NotifStatus.SUPPRESSED);
+      expect(result.sentAt).toBeNull();
+      expect((result.payload as any)?.suppressionReason).toContain('explicitly opted out of SMS');
+      expect(mockIntegrations.sms.send).not.toHaveBeenCalled();
+    });
+
+    it('isolates channel consent: customer opted out of WhatsApp can still receive Email if opted in', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({
+        id: 'cust_multi',
+        name: 'Multi Channel Corp',
+        email: 'billing@multicorp.in',
+        phone: '+91 98765 43210',
+        emailConsent: ConsentState.OPTED_IN,
+        whatsappConsent: ConsentState.OPTED_OUT,
+      });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_email_allowed', ...data }),
+      );
+
+      // Email dispatch succeeds
+      const emailRes = await service.dispatch(mockUser, {
+        customerId: 'cust_multi',
+        channel: NotificationChannel.EMAIL,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: { invoiceNumber: 'INV-EMAIL-01', amount: 30000, dueDate: '2026-10-01' },
+      });
+      expect(emailRes.status).toBe(NotifStatus.DELIVERED);
+
+      // WhatsApp dispatch is blocked
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_multi',
+          channel: NotificationChannel.WHATSAPP,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('automated reminders increment suppressedCount (not dispatchedCount or failedCount) when consent is UNKNOWN or OPTED_OUT', async () => {
+      const pastDate = new Date(Date.now() - 40 * 86400000); // 40 days overdue -> WhatsApp
+      mockPrisma.invoice.findMany.mockResolvedValue([
+        {
+          id: 'inv_unknown_consent',
+          number: 'INV-UNKNOWN-01',
+          customerId: 'cust_unk',
+          outstanding: 75000,
+          dueDate: pastDate,
+          customer: {
+            id: 'cust_unk',
+            name: 'Unknown Consent Customer',
+            phone: '+91 98765 43210',
+            email: 'unk@customer.in',
+            whatsappConsent: ConsentState.UNKNOWN,
+          },
+        },
+      ]);
+
+      const res = await service.triggerAutomatedReminders(mockUser);
+      expect(res.evaluatedInvoices).toBe(1);
+      expect(res.dispatchedCount).toBe(0);
+      expect(res.failedCount).toBe(0);
+      expect(res.suppressedCount).toBe(1);
+      expect(res.details[0].skipped).toBe(true);
+      expect(res.details[0].status).toBe(NotifStatus.SUPPRESSED);
+      expect(res.details[0].reason).toContain('consent state: UNKNOWN');
+      expect(mockIntegrations.whatsapp.send).not.toHaveBeenCalled();
     });
   });
 });

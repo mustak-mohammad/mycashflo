@@ -17,7 +17,7 @@ describe('ResendEmailAdapter', () => {
   });
 
   describe('Simulation Mode & Safety Guard', () => {
-    it('1. should operate in safe simulation mode when delivery is disabled', async () => {
+    it('1. should report FAILED (not DELIVERED) when delivery is disabled by safety policy', async () => {
       const result = await adapter.send(
         {
           to: 'customer@democorp.in',
@@ -27,10 +27,11 @@ describe('ResendEmailAdapter', () => {
         { deliveryEnabled: false },
       );
 
-      expect(result.status).toBe('DELIVERED');
+      expect(result.status).toBe('FAILED');
       expect(result.isSimulated).toBe(true);
-      expect(result.provider).toBe('SIMULATED');
-      expect(result.messageId).toMatch(/^msg_sim_/);
+      expect(result.provider).toBe('RESEND');
+      expect(result.error).toContain('disabled by safety policy');
+      expect(result.messageId).toMatch(/^msg_disabled_/);
     });
 
     it('2. should block real customer address when not matching test allowlist in non-production', async () => {
@@ -126,7 +127,7 @@ describe('ResendEmailAdapter', () => {
       expect(result.messageId).toBe('re_isolated_test_001');
     });
 
-    it('4c. should keep unrelated non-test dispatches in safe simulation mode when REMINDERS_TEST_EMAIL_DELIVERY_ENABLED is true but EMAIL_DELIVERY_ENABLED is false', async () => {
+    it('4c. should report FAILED when REMINDERS_TEST_EMAIL_DELIVERY_ENABLED is true but dispatch is not an authorized test send', async () => {
       process.env.NODE_ENV = 'development';
       process.env.EMAIL_DELIVERY_ENABLED = 'false'; // Global delivery disabled
       process.env.REMINDERS_TEST_EMAIL_DELIVERY_ENABLED = 'true'; // Scoped test enabled
@@ -143,11 +144,12 @@ describe('ResendEmailAdapter', () => {
         // isTest is undefined / false
       });
 
-      // Must remain in safe simulation mode!
-      expect(result.status).toBe('DELIVERED');
+      // Must report FAILED with safety policy reason, never false DELIVERED
+      expect(result.status).toBe('FAILED');
       expect(result.isSimulated).toBe(true);
-      expect(result.provider).toBe('SIMULATED');
-      expect(result.messageId).toMatch(/^msg_sim_/);
+      expect(result.provider).toBe('RESEND');
+      expect(result.error).toContain('disabled by safety policy');
+      expect(result.messageId).toMatch(/^msg_disabled_/);
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
@@ -176,19 +178,22 @@ describe('ResendEmailAdapter', () => {
   });
 
   describe('Configuration & Error Handling', () => {
-    it('5. should throw BadRequestException when delivery is enabled but API key is missing', async () => {
+    it('5. should return FAILED when delivery is enabled but API key is missing', async () => {
       delete process.env.RESEND_API_KEY;
 
-      await expect(
-        adapter.send(
-          {
-            to: 'delivered@resend.dev',
-            subject: 'Test',
-            text: 'Test',
-          },
-          { deliveryEnabled: true, apiKey: '' },
-        ),
-      ).rejects.toThrow(BadRequestException);
+      const result = await adapter.send(
+        {
+          to: 'delivered@resend.dev',
+          subject: 'Test',
+          text: 'Test',
+        },
+        { deliveryEnabled: true, apiKey: '' },
+      );
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('RESEND_API_KEY is not configured');
+      expect(result.messageId).toMatch(/^msg_no_key_/);
     });
 
     it('6. should reject invalid recipient email syntax safely without calling API', async () => {
@@ -231,6 +236,32 @@ describe('ResendEmailAdapter', () => {
       expect(result.isSimulated).toBe(false);
     });
 
+    it('7b. should handle HTTP 401 Unauthorized and sanitize leaked API keys', async () => {
+      process.env.EMAIL_DELIVERY_ENABLED = 'true';
+      process.env.RESEND_API_KEY = 're_secret_live_key_99999';
+      process.env.EMAIL_TEST_RECIPIENT = 'delivered@resend.dev';
+
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: async () => ({
+          statusCode: 401,
+          message: 'Invalid API key re_secret_live_key_99999 provided',
+        }),
+      } as any);
+
+      const result = await adapter.send({
+        to: 'delivered@resend.dev',
+        subject: 'Invoice Notice',
+        text: 'Please pay',
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).not.toContain('re_secret_live_key_99999');
+      expect(result.error).toContain('[REDACTED_API_KEY]');
+    });
+
     it('8. should retry on transient 5xx server errors and return FAILED if retries fail', async () => {
       process.env.EMAIL_DELIVERY_ENABLED = 'true';
       process.env.RESEND_API_KEY = 're_test_key_123456';
@@ -255,6 +286,62 @@ describe('ResendEmailAdapter', () => {
       expect(callCount).toBe(3); // 1 initial + 2 retries
       expect(result.status).toBe('FAILED');
       expect(result.error).toContain('Service Temporarily Unavailable');
+    });
+
+    it('8b. should return FAILED on network connection errors (e.g. DNS failure)', async () => {
+      process.env.EMAIL_DELIVERY_ENABLED = 'true';
+      process.env.RESEND_API_KEY = 're_test_key_123456';
+      process.env.EMAIL_TEST_RECIPIENT = 'delivered@resend.dev';
+
+      vi.spyOn(global, 'fetch').mockRejectedValue(new Error('getaddrinfo ENOTFOUND api.resend.com'));
+
+      const result = await adapter.send({
+        to: 'delivered@resend.dev',
+        subject: 'Test Network Error',
+        text: 'Network error test',
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('ENOTFOUND');
+      expect(result.messageId).toMatch(/^msg_err_/);
+    });
+
+    it('8c. should return FAILED on request timeout (AbortError)', async () => {
+      process.env.EMAIL_DELIVERY_ENABLED = 'true';
+      process.env.RESEND_API_KEY = 're_test_key_123456';
+      process.env.EMAIL_TEST_RECIPIENT = 'delivered@resend.dev';
+
+      const abortError = new Error('The operation was aborted due to timeout');
+      abortError.name = 'TimeoutError';
+      vi.spyOn(global, 'fetch').mockRejectedValue(abortError);
+
+      const result = await adapter.send({
+        to: 'delivered@resend.dev',
+        subject: 'Test Timeout',
+        text: 'Timeout test',
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('timed out');
+      expect(result.messageId).toMatch(/^msg_err_/);
+    });
+
+    it('8d. guarantees that disabled or failed email is NEVER reported as DELIVERED', async () => {
+      const disabledRes = await adapter.send(
+        { to: 'cust@democorp.in', subject: 'Notice', text: 'Text' },
+        { deliveryEnabled: false },
+      );
+      expect(disabledRes.status).not.toBe('DELIVERED');
+      expect(disabledRes.status).toBe('FAILED');
+
+      const noKeyRes = await adapter.send(
+        { to: 'delivered@resend.dev', subject: 'Notice', text: 'Text' },
+        { deliveryEnabled: true, apiKey: '' },
+      );
+      expect(noKeyRes.status).not.toBe('DELIVERED');
+      expect(noKeyRes.status).toBe('FAILED');
     });
   });
 

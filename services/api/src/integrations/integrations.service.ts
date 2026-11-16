@@ -367,14 +367,15 @@ export class IntegrationsService {
           },
           config,
         );
+        const isConnSuccess = sendResult.isSimulated || sendResult.status !== 'FAILED';
         return {
           provider: 'SMS_GATEWAY',
-          status: sendResult.status === 'FAILED' ? 'FAILED' : 'SUCCESS',
+          status: isConnSuccess ? 'SUCCESS' : 'FAILED',
           isSimulated: sendResult.isSimulated,
           message: sendResult.isSimulated
             ? 'SMS Gateway operating in simulation mode. Ready for test dispatch.'
             : (sendResult.status === 'FAILED'
-                ? `SMS connectivity error: ${sendResult.raw?.error || 'dispatch failed'}`
+                ? `SMS connectivity error: ${sendResult.error || sendResult.raw?.error || 'dispatch failed'}`
                 : 'SMS Gateway credentials verified successfully. Test message dispatched.'),
           messageId: sendResult.messageId,
         };

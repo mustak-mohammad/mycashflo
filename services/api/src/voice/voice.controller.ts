@@ -6,6 +6,7 @@ import {
   Query,
   Req,
   Res,
+  Param,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -24,12 +25,47 @@ import {
   StartRecordingDto,
   StopRecordingDto,
 } from './voice.service.js';
-import type { ConversationTurnResult } from './voice.service.js';
+import {
+  DocumentDeliveryService,
+  CreateDocumentDeliveryDto,
+  DocumentDeliveryQueryDto,
+} from './document-delivery.service.js';
+import type {
+  ConversationTurnResult,
+  InitialGreetingDto,
+  InitialGreetingResult,
+  StructuredCallSummary,
+} from './voice.service.js';
 
 @ApiTags('voice')
 @Controller('voice')
 export class VoiceController {
-  constructor(private readonly voiceService: VoiceService) {}
+  constructor(
+    private readonly voiceService: VoiceService,
+    private readonly documentDeliveryService: DocumentDeliveryService,
+  ) {}
+
+  @Post('initial-greeting')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Resolve verified customer-facing initial prompt and conversation goal' })
+  getInitialGreeting(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: InitialGreetingDto,
+  ): Promise<InitialGreetingResult> {
+    return this.voiceService.getInitialGreeting(user, dto);
+  }
+
+  @Post('summary')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Generate structured post-call summary and validated commitments' })
+  generateStructuredSummary(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: any,
+  ): StructuredCallSummary {
+    return this.voiceService.generateStructuredCallSummary(dto);
+  }
 
   @Post('token')
   @ApiBearerAuth()
@@ -81,6 +117,8 @@ export class VoiceController {
   }
 
   @Get('synthesize')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Synthesize speech audio for Chotu AI voice prompts & replies' })
   async synthesizeSpeech(
     @Query('text') text: string,
@@ -102,6 +140,68 @@ export class VoiceController {
   ) {
     const rawBody = req.rawBody || req.body;
     return this.voiceService.handleLiveKitWebhook(rawBody, authHeader);
+  }
+
+  @Post('document-requests')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Request invoice and/or payment link delivery via WhatsApp and/or Email' })
+  requestDocumentDelivery(
+    @CurrentUser() user: AuthUser,
+    @Body() dto: CreateDocumentDeliveryDto,
+    @Req() req: Request,
+  ) {
+    const protocol = req.protocol || 'http';
+    const host = req.get('host') || 'localhost:3000';
+    const baseUrl = `${protocol}://${host}`;
+    return this.documentDeliveryService.requestDelivery(user, dto, baseUrl);
+  }
+
+  @Get('document-requests')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'List customer document delivery requests for current tenant' })
+  getDocumentDeliveryRequests(
+    @CurrentUser() user: AuthUser,
+    @Query() query: DocumentDeliveryQueryDto,
+  ) {
+    return this.documentDeliveryService.findAll(user, query);
+  }
+
+  @Get('document-requests/:id')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Get details of a document delivery request and its channel attempts' })
+  getDocumentDeliveryRequest(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    return this.documentDeliveryService.findOne(id, user);
+  }
+
+  @Post('document-requests/:id/cancel')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Cancel a customer document delivery request' })
+  cancelDocumentDelivery(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+  ) {
+    return this.documentDeliveryService.cancelDelivery(user, id);
+  }
+
+  @Get('document-requests/invoices/:id/download')
+  @ApiOperation({ summary: 'Download invoice PDF using a short-lived cryptographically signed token' })
+  async downloadSignedInvoicePdf(
+    @Param('id') id: string,
+    @Query('token') token: string,
+    @Res() res: Response,
+  ) {
+    const { buffer, filename } = await this.documentDeliveryService.getSecureInvoicePdf(id, token);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.end(buffer);
   }
 }
 

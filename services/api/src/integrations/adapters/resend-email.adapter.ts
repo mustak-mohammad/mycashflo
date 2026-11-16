@@ -21,6 +21,15 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export class ResendEmailAdapter implements EmailProviderAdapter {
   private readonly logger = new Logger(ResendEmailAdapter.name);
 
+  private sanitizeSecretString(str: any): string {
+    if (typeof str !== 'string') return String(str || '');
+    return str
+      .replace(/re_[A-Za-z0-9_-]+/g, '[REDACTED_API_KEY]')
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]')
+      .replace(/((?:api_key|apiKey|secret)=)[^\s&,;'"]+/gi, '$1[REDACTED]');
+  }
+
   /**
    * Send transactional email via Resend or safe simulation mode.
    *
@@ -70,17 +79,18 @@ export class ResendEmailAdapter implements EmailProviderAdapter {
       };
     }
 
-    // ── Safe Simulation Mode ──────────────────────────────────────────────────
+    // ── Delivery Disabled Policy ──────────────────────────────────────────────
     if (!deliveryEnabled) {
-      const simMessageId = `msg_sim_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      this.logger.log(`[SIMULATION] Email delivery suppressed by safety policy. Simulated message: ${simMessageId} to ${cleanTo}`);
+      this.logger.log(`[SIMULATION] Email delivery suppressed by safety policy. Target: ${cleanTo}`);
       return {
-        messageId: simMessageId,
-        provider: 'SIMULATED',
-        status: 'DELIVERED',
+        messageId: `msg_disabled_${Date.now()}`,
+        provider: 'RESEND',
+        status: 'FAILED',
         isSimulated: true,
+        error: 'Email delivery is disabled by safety policy (EMAIL_DELIVERY_ENABLED is false)',
         raw: {
           simulated: true,
+          deliveryDisabled: true,
           recipient: cleanTo,
           subject: input.subject,
           timestamp: new Date().toISOString(),
@@ -90,9 +100,22 @@ export class ResendEmailAdapter implements EmailProviderAdapter {
 
     // ── Live Delivery Path ───────────────────────────────────────────────────
     if (!apiKey) {
-      throw new BadRequestException(
+      this.logger.warn(
         'Email delivery is enabled, but RESEND_API_KEY is not configured. Set RESEND_API_KEY in environment or tenant integration config.',
       );
+      return {
+        messageId: `msg_no_key_${Date.now()}`,
+        provider: 'RESEND',
+        status: 'FAILED',
+        isSimulated: false,
+        error: 'Email delivery is enabled, but RESEND_API_KEY is not configured.',
+        raw: {
+          missingCredentials: true,
+          recipient: cleanTo,
+          subject: input.subject,
+          timestamp: new Date().toISOString(),
+        },
+      };
     }
 
     // Test-Recipient Guard: In non-production or when EMAIL_TEST_RECIPIENT is set,
@@ -164,8 +187,9 @@ export class ResendEmailAdapter implements EmailProviderAdapter {
           };
         }
 
-        const errMsg = data?.message || `Resend API returned HTTP ${response.status}`;
-        lastError = errMsg;
+        const rawErrMsg = data?.message || `Resend API returned HTTP ${response.status}`;
+        const safeErrMsg = this.sanitizeSecretString(rawErrMsg);
+        lastError = safeErrMsg;
 
         // Only retry on transient 5xx server errors
         if (response.status >= 500 && attempt < maxRetries) {
@@ -175,17 +199,24 @@ export class ResendEmailAdapter implements EmailProviderAdapter {
           continue;
         }
 
-        this.logger.warn(`Resend delivery rejected (${response.status}): ${errMsg}`);
+        this.logger.warn(`Resend delivery rejected (${response.status}): ${safeErrMsg}`);
         return {
           messageId: `msg_failed_${Date.now()}`,
           provider: 'RESEND',
           status: 'FAILED',
           isSimulated: false,
-          error: errMsg,
+          error: safeErrMsg,
           raw: data,
         };
       } catch (networkErr: any) {
-        lastError = networkErr.message || 'Network error communicating with Resend';
+        const isTimeout =
+          networkErr?.name === 'TimeoutError' ||
+          networkErr?.name === 'AbortError' ||
+          networkErr?.code === 'ETIMEDOUT';
+        const rawNetMsg = isTimeout
+          ? 'Resend API request timed out'
+          : networkErr.message || 'Network error communicating with Resend';
+        lastError = this.sanitizeSecretString(rawNetMsg);
         if (attempt < maxRetries) {
           attempt++;
           const delay = Math.pow(2, attempt) * 200;
@@ -210,12 +241,13 @@ export class ResendEmailAdapter implements EmailProviderAdapter {
    * Verify Svix standard webhook signatures for Resend callbacks.
    */
   verifyWebhookSignature(payload: any, signature: string, secret?: string): boolean {
+    const isProd = process.env.NODE_ENV === 'production';
     const webhookSecret = secret || process.env.RESEND_WEBHOOK_SECRET;
     if (!signature) return false;
 
-    // Fast mock/simulation signature verification for automated test suites
-    if (signature === 'mock_valid_signature' || signature.startsWith('sim_')) {
-      return true;
+    const isSimSig = signature === 'mock_valid_signature' || signature.startsWith('sim_');
+    if (isSimSig) {
+      return !isProd;
     }
 
     if (!webhookSecret) return false;

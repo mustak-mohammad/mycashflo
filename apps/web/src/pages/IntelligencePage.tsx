@@ -16,6 +16,7 @@ import {
 } from '../api/notifications'
 import { getAuditLogs } from '../api/auditLogs'
 import { customersApi } from '../api/customers'
+import { extractSafeErrorMessage } from '../utils/safeError'
 import type {
   ActionProposal,
   Notification,
@@ -75,8 +76,8 @@ export default function IntelligencePage() {
       ])
       setPendingProposals(pending)
       setAllProposals(all)
-    } catch (err: any) {
-      console.error(err)
+    } catch (err: unknown) {
+      showAlert(extractSafeErrorMessage(err, 'Failed to load AI action proposals.'), 'error')
     } finally {
       setLoadingApprovals(false)
     }
@@ -95,8 +96,8 @@ export default function IntelligencePage() {
       if (custsRes.data.length > 0 && !dispatchCustomer) {
         setDispatchCustomer(custsRes.data[0].id)
       }
-    } catch (err: any) {
-      console.error(err)
+    } catch (err: unknown) {
+      showAlert(extractSafeErrorMessage(err, 'Failed to load reminder notifications.'), 'error')
     }
   }
 
@@ -104,8 +105,8 @@ export default function IntelligencePage() {
     try {
       const res = await getAuditLogs({ limit: 50, action: actionFilter || undefined })
       setAuditLogs(res.data)
-    } catch (err: any) {
-      console.error(err)
+    } catch (err: unknown) {
+      showAlert(extractSafeErrorMessage(err, 'Failed to load intelligence audit logs.'), 'error')
     }
   }
 
@@ -555,6 +556,8 @@ export default function IntelligencePage() {
                                 ? 'bg-emerald-500/20 text-emerald-300'
                                 : n.status === 'SENT'
                                 ? 'bg-blue-500/20 text-blue-300'
+                                : n.status === 'SUPPRESSED'
+                                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
                                 : n.status === 'FAILED'
                                 ? 'bg-rose-500/20 text-rose-300'
                                 : 'bg-amber-500/20 text-amber-300'

@@ -5,7 +5,14 @@ import { NotificationsService } from '../notifications/notifications.service.js'
 import { IntegrationsService } from '../integrations/integrations.service.js';
 import { PromptsService } from '../prompts/prompts.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { InvoiceStatus, NotificationChannel, NotifStatus } from '@prisma/client';
+import { InvoiceStatus, NotificationChannel, NotifStatus, ConsentState } from '@prisma/client';
+import { evaluateCustomerConsent } from '../common/consent-policy.js';
+import {
+  getInvoiceReminderStage,
+  calculateDaysUntilDue,
+  classifyReminderStage,
+  getTenantLocalDate,
+} from './calendar-stage.util.js';
 import type {
   TenantReminderSettings,
   UpdateReminderSettingsDto,
@@ -195,28 +202,17 @@ export class RemindersService {
    * Get formatted local date string in tenant timezone (YYYY-MM-DD)
    */
   getLocalDateInTimezone(timezone: string, date: Date = new Date()): string {
-    try {
-      const formatter = new Intl.DateTimeFormat('en-CA', {
-        timeZone: timezone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      });
-      return formatter.format(date);
-    } catch {
-      return date.toISOString().split('T')[0];
-    }
+    return getTenantLocalDate(date, timezone) ?? date.toISOString().split('T')[0];
   }
 
   /**
-   * Map days overdue to reminder escalation stage
+   * Map days overdue to reminder escalation stage.
+   * Note: daysOverdue is -daysUntilDue (positive = overdue, negative = future, 0 = due today).
+   * Invoices due in > 3 days (daysOverdue < -3) return null (not eligible).
    */
-  calculateStage(daysOverdue: number): ReminderStage {
-    if (daysOverdue < 0) return 'DUE_SOON';
-    if (daysOverdue === 0) return 'DUE_TODAY';
-    if (daysOverdue <= 6) return 'OVERDUE_STAGE_1';
-    if (daysOverdue <= 14) return 'OVERDUE_STAGE_2';
-    return 'OVERDUE_STAGE_3';
+  calculateStage(daysOverdue: number): ReminderStage | null {
+    const daysUntilDue = -daysOverdue;
+    return classifyReminderStage(daysUntilDue);
   }
 
   /**
@@ -433,14 +429,23 @@ export class RemindersService {
       const customerRunCounts = new Map<string, number>();
 
       for (const invoice of invoices) {
+        // Evaluate reminder stage using tenant-timezone calendar-day logic
+        const stage = getInvoiceReminderStage(invoice.dueDate, now, settings.timezone);
+
+        // Invoices outside the upcoming reminder window (due in > 3 days) or with invalid dates/timezones
+        // are explicitly not eligible and must be skipped before constructing idempotency keys or dispatching
+        if (!stage) {
+          continue;
+        }
+
+        const daysUntilDue = calculateDaysUntilDue(invoice.dueDate, now, settings.timezone) ?? 0;
+        const daysOverdue = Math.max(0, -daysUntilDue);
         const outstandingAmount = Number(invoice.outstanding);
-        const diffTime = now.getTime() - new Date(invoice.dueDate).getTime();
-        const daysOverdue = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-        const stage = this.calculateStage(daysOverdue);
 
         // Persistent idempotency key per tenant, invoice, stage, and occurrence date
         const idempotencyKey = `rem_${tenantId}_${invoice.id}_${stage}_${localDate}`;
 
+        const configuredPreference = settings.channelPreference;
         const item: ReminderEvaluationItem = {
           invoiceId: invoice.id,
           invoiceNumber: invoice.number,
@@ -453,16 +458,16 @@ export class RemindersService {
           daysOverdue,
           stage,
           channel:
-            settings.channelPreference === 'BOTH'
+            configuredPreference === 'BOTH'
               ? 'BOTH'
-              : settings.channelPreference === 'WHATSAPP'
+              : configuredPreference === 'WHATSAPP'
                 ? 'WHATSAPP'
                 : 'EMAIL',
           idempotencyKey,
           isEligible: false,
           messagePreview: this.generateChotuReminderMessage({
             stage,
-            channel: settings.channelPreference === 'WHATSAPP' ? 'WHATSAPP' : 'EMAIL',
+            channel: configuredPreference === 'WHATSAPP' ? 'WHATSAPP' : 'EMAIL',
             customerName: invoice.customer.name,
             invoiceNumber: invoice.number,
             amount: outstandingAmount,
@@ -496,7 +501,7 @@ export class RemindersService {
           continue;
         }
 
-        // ── 3. Check Customer Status & Consent (DND / Cease-Contact) ─────────
+        // ── 3. Check Customer Status ─────────────────────────────────────────
         if (invoice.customer.status !== 'ACTIVE') {
           item.suppressionReason = 'CUSTOMER_INACTIVE';
           summary.suppressedCount++;
@@ -504,64 +509,103 @@ export class RemindersService {
           continue;
         }
 
-        if (
-          invoice.customer.notes &&
-          (invoice.customer.notes.includes('DND:NO_CONTACT') || invoice.customer.notes.includes('OPT_OUT'))
-        ) {
-          item.suppressionReason = 'DND_NO_CONTACT';
-          summary.suppressedCount++;
-          summary.items.push(item);
-          continue;
-        }
+        // ── 4. Independent Per-Channel Consent & Recipient Evaluation ──────────
+        const candidateChannels: NotificationChannel[] =
+          configuredPreference === 'BOTH'
+            ? [NotificationChannel.EMAIL, NotificationChannel.WHATSAPP]
+            : configuredPreference === 'WHATSAPP'
+              ? [NotificationChannel.WHATSAPP]
+              : [NotificationChannel.EMAIL];
 
-        // ── 4. Check Recipient Validity ──────────────────────────────────────
-        const channel = item.channel;
-        if (channel === 'EMAIL' || channel === 'BOTH') {
-          if (!invoice.customer.email || !invoice.customer.email.includes('@')) {
-            item.suppressionReason = 'MISSING_OR_INVALID_EMAIL';
-            summary.suppressedCount++;
-            summary.items.push(item);
+        const permittedChannels: NotificationChannel[] = [];
+        const channelSuppressions = new Map<NotificationChannel, string>();
+
+        for (const ch of candidateChannels) {
+          // 4a. Independent Structured Consent Evaluation (Central Policy)
+          const consentEval = evaluateCustomerConsent(invoice.customer, ch);
+          if (!consentEval.allowed) {
+            let reason: string;
+            if (
+              consentEval.classification !== 'NONE' ||
+              (invoice.customer.notes &&
+                (invoice.customer.notes.includes('DND:NO_CONTACT') ||
+                  invoice.customer.notes.includes('OPT_OUT')))
+            ) {
+              reason = 'DND_NO_CONTACT';
+            } else if (consentEval.consentState === ConsentState.OPTED_OUT) {
+              reason = `OPTED_OUT_${ch}`;
+            } else {
+              reason = `CONSENT_UNKNOWN_${ch}`;
+            }
+            channelSuppressions.set(ch, reason);
             continue;
           }
-        }
-        if (channel === 'WHATSAPP' || channel === 'BOTH') {
-          const cleanPhone = (invoice.customer.phone || '').replace(/[^\d]/g, '');
-          if (cleanPhone.length < 8) {
-            item.suppressionReason = 'MISSING_OR_INVALID_PHONE';
-            summary.suppressedCount++;
-            summary.items.push(item);
-            continue;
-          }
 
-          // ── 4b. Check Tenant Company Contact Number for WhatsApp Overdue Reminders ─
-          if (stage.startsWith('OVERDUE')) {
-            const contactVal = validateCompanyContactNumber(tenantContactNumber, invoice.customer.phone);
-            if (!contactVal.valid) {
-              item.suppressionReason = 'MISSING_OR_INVALID_COMPANY_CONTACT_NUMBER';
-              summary.suppressedCount++;
-              summary.items.push(item);
+          // 4b. Recipient Validity for Channel
+          if (ch === NotificationChannel.EMAIL) {
+            if (!invoice.customer.email || !invoice.customer.email.includes('@')) {
+              channelSuppressions.set(ch, 'MISSING_OR_INVALID_EMAIL');
               continue;
             }
+          } else if (ch === NotificationChannel.WHATSAPP) {
+            const cleanPhone = (invoice.customer.phone || '').replace(/[^\d]/g, '');
+            if (cleanPhone.length < 8) {
+              channelSuppressions.set(ch, 'MISSING_OR_INVALID_PHONE');
+              continue;
+            }
+            if (stage.startsWith('OVERDUE')) {
+              const contactVal = validateCompanyContactNumber(tenantContactNumber, invoice.customer.phone);
+              if (!contactVal.valid) {
+                channelSuppressions.set(ch, 'MISSING_OR_INVALID_COMPANY_CONTACT_NUMBER');
+                continue;
+              }
+            }
           }
+
+          // 4c. Channel-Specific Idempotency Check for Today
+          const channelIdempKey = `${idempotencyKey}_${ch}`;
+          const existingIdemp = await this.prisma.notification.findFirst({
+            where: {
+              tenantId,
+              channel: ch,
+              status: { in: [NotifStatus.SENT, NotifStatus.DELIVERED, NotifStatus.QUEUED] },
+              OR: [
+                { payload: { path: ['channelIdempotencyKey'], equals: channelIdempKey } },
+                { payload: { path: ['idempotencyKey'], equals: idempotencyKey } },
+              ],
+            },
+          });
+
+          if (existingIdemp) {
+            channelSuppressions.set(ch, 'ALREADY_SENT_FOR_STAGE_TODAY');
+            continue;
+          }
+
+          // Channel passed all recipient, consent, and idempotency checks!
+          permittedChannels.push(ch);
         }
 
-        // ── 5. Persistent Idempotency & Duplicate Prevention ────────────────
-        const existingIdemp = await this.prisma.notification.findFirst({
-          where: {
-            tenantId,
-            payload: { path: ['idempotencyKey'], equals: idempotencyKey },
-            status: { in: [NotifStatus.SENT, NotifStatus.DELIVERED, NotifStatus.QUEUED] },
-          },
-        });
-
-        if (existingIdemp) {
-          item.suppressionReason = 'ALREADY_SENT_FOR_STAGE_TODAY';
+        // If no candidate channels are permitted, suppress the item entirely
+        if (permittedChannels.length === 0) {
+          const reasons = Array.from(new Set(channelSuppressions.values()));
+          if (reasons.length === 1 && reasons[0] === 'DND_NO_CONTACT') {
+            item.suppressionReason = 'DND_NO_CONTACT';
+          } else if (reasons.length === 1 && reasons[0] === 'ALREADY_SENT_FOR_STAGE_TODAY') {
+            item.suppressionReason = 'ALREADY_SENT_FOR_STAGE_TODAY';
+          } else if (candidateChannels.length === 1) {
+            item.suppressionReason = channelSuppressions.get(candidateChannels[0]) || 'CHANNEL_SUPPRESSED';
+          } else {
+            // BOTH channels suppressed with specific reasons
+            item.suppressionReason = Array.from(channelSuppressions.entries())
+              .map(([c, r]) => `${c}:${r}`)
+              .join('; ');
+          }
           summary.suppressedCount++;
           summary.items.push(item);
           continue;
         }
 
-        // ── 6. Check Frequency Limits (Daily & Minimum Days Between Reminders) ─
+        // ── 5. Check Frequency Limits (Daily & Minimum Days Between Reminders) ─
         const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
         const customerRecentCount = await this.prisma.notification.count({
           where: {
@@ -600,7 +644,7 @@ export class RemindersService {
           continue;
         }
 
-        // ── 7. Recheck Payment Status Right Before Dispatch ──────────────────
+        // ── 6. Recheck Payment Status Right Before Dispatch ──────────────────
         const freshInvoice = await this.prisma.invoice.findUnique({
           where: { id: invoice.id },
         });
@@ -617,15 +661,19 @@ export class RemindersService {
           continue;
         }
 
-        // Invoice is genuinely eligible!
+        // Invoice is genuinely eligible for permitted channels!
         item.isEligible = true;
         summary.eligibleCount++;
         customerRunCounts.set(invoice.customer.id, inRunCount + 1);
 
-        // ── 8. Prepare Chotu AI Message Preview with fresh outstanding ───────
+        // ── 7. Prepare Chotu AI Message Preview with fresh outstanding ───────
+        const primaryChannel = permittedChannels.includes(NotificationChannel.WHATSAPP)
+          ? NotificationChannel.WHATSAPP
+          : NotificationChannel.EMAIL;
+
         const preview = this.generateChotuReminderMessage({
           stage,
-          channel: channel === 'WHATSAPP' ? 'WHATSAPP' : 'EMAIL',
+          channel: primaryChannel === NotificationChannel.WHATSAPP ? 'WHATSAPP' : 'EMAIL',
           customerName: invoice.customer.name,
           invoiceNumber: invoice.number,
           amount: Number(freshInvoice.outstanding),
@@ -636,30 +684,26 @@ export class RemindersService {
         });
         item.messagePreview = preview;
 
-        // ── 9. Dispatch Execution or Dry-Run Simulation ──────────────────────
+        // ── 8. Dispatch Execution or Dry-Run Simulation ──────────────────────
         if (isDryRun) {
           item.dispatchStatus = 'SIMULATED';
           summary.dispatchedCount++;
           summary.items.push(item);
         } else {
-          // Live Dispatch Mode
-          try {
-            const channelsToDispatch: NotificationChannel[] =
-              channel === 'BOTH'
-                ? [NotificationChannel.EMAIL, NotificationChannel.WHATSAPP]
-                : channel === 'WHATSAPP'
-                  ? [NotificationChannel.WHATSAPP]
-                  : [NotificationChannel.EMAIL];
+          // Live Dispatch Mode: Dispatch strictly to permitted channels
+          let lastDispatchedNotif: any = null;
+          let dispatchedSuccessCount = 0;
+          let failedCountForInvoice = 0;
+          const channelErrors: string[] = [];
 
-            let lastDispatchedNotif: any = null;
+          for (const ch of permittedChannels) {
+            const testRecipient = testMode
+              ? (ch === NotificationChannel.EMAIL
+                  ? (settings.testRecipientEmail || process.env.EMAIL_TEST_RECIPIENT)
+                  : (settings.testRecipientPhone || process.env.WHATSAPP_TEST_RECIPIENT))
+              : undefined;
 
-            for (const ch of channelsToDispatch) {
-              const testRecipient = testMode
-                ? (ch === NotificationChannel.EMAIL
-                    ? (settings.testRecipientEmail || process.env.EMAIL_TEST_RECIPIENT)
-                    : (settings.testRecipientPhone || process.env.WHATSAPP_TEST_RECIPIENT))
-                : undefined;
-
+            try {
               const notif = await this.notifications.dispatch(
                 {
                   tenantId,
@@ -687,20 +731,38 @@ export class RemindersService {
                     isTest: testMode,
                     testScope: testMode ? 'SCHEDULED_REMINDER_TEST' : undefined,
                     testRecipient,
+                    persistSuppressed: true,
                   },
                 },
               );
-              lastDispatchedNotif = notif;
-            }
 
-            item.dispatchedNotificationId = lastDispatchedNotif?.id;
-            item.dispatchStatus = lastDispatchedNotif?.status;
+              lastDispatchedNotif = notif;
+              if (notif.status === NotifStatus.FAILED) {
+                failedCountForInvoice++;
+                channelErrors.push(`${ch}: ${notif.failReason || 'Failed'}`);
+              } else if (notif.status === NotifStatus.SUPPRESSED) {
+                channelErrors.push(`${ch}: SUPPRESSED (${notif.failReason})`);
+              } else {
+                dispatchedSuccessCount++;
+              }
+            } catch (dispatchErr: any) {
+              this.logger.error(`Failed to dispatch ${ch} reminder for invoice ${invoice.number}: ${dispatchErr.message}`);
+              failedCountForInvoice++;
+              channelErrors.push(`${ch}: ${dispatchErr.message}`);
+            }
+          }
+
+          item.dispatchedNotificationId = lastDispatchedNotif?.id;
+          if (dispatchedSuccessCount > 0) {
             summary.dispatchedCount++;
-          } catch (dispatchErr: any) {
-            this.logger.error(`Failed to dispatch automated reminder for invoice ${invoice.number}: ${dispatchErr.message}`);
-            item.dispatchStatus = NotifStatus.FAILED;
-            item.suppressionReason = dispatchErr.message;
+            item.dispatchStatus = lastDispatchedNotif?.status ?? NotifStatus.SENT;
+            if (failedCountForInvoice > 0) {
+              item.suppressionReason = `Partial dispatch: ${channelErrors.join('; ')}`;
+            }
+          } else {
             summary.failedCount++;
+            item.dispatchStatus = NotifStatus.FAILED;
+            item.suppressionReason = channelErrors.join('; ') || 'All permitted channels failed dispatch';
           }
           summary.items.push(item);
         }
@@ -811,7 +873,7 @@ export class RemindersService {
     const now = new Date();
     const diffTime = now.getTime() - new Date(invoice.dueDate).getTime();
     const daysOverdue = Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
-    const stage = this.calculateStage(daysOverdue);
+    const stage: ReminderStage = this.calculateStage(daysOverdue) ?? 'DUE_SOON';
 
     const tenantContactNumber = (await this.notifications.getTenantContactNumber?.(tenantId)) || settings.companyContactNumber;
 

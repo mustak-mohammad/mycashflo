@@ -19,9 +19,9 @@ describe('CallsService - Recording Management and Playback Tests', () => {
   };
 
   let callSessions: any[] = [];
-  const testTenantDir = path.join(process.cwd(), 'uploads', 'recordings', 'tenant_rec_test');
+  const getTestTenantDir = () => callsService.getUploadsDir('tenant_rec_test');
 
-  beforeEach(() => {
+  beforeEach(async () => {
     callSessions = [
       {
         id: 'call_rec_001',
@@ -110,17 +110,30 @@ describe('CallsService - Recording Management and Playback Tests', () => {
     mockIntegrations = null;
 
     callsService = new CallsService(mockPrisma, mockRecorder, mockAuditLogs, mockIntegrations);
+
+    // Clean up test upload files before each test run
+    const testDir = callsService.getUploadsDir('tenant_rec_test');
+    try {
+      if (fs.existsSync(testDir)) {
+        const files = await fs.promises.readdir(testDir);
+        for (const file of files) {
+          await fs.promises.unlink(path.join(testDir, file));
+        }
+        await fs.promises.rmdir(testDir);
+      }
+    } catch (_) {}
   });
 
   afterEach(async () => {
     // Clean up test upload files
     try {
-      if (fs.existsSync(testTenantDir)) {
-        const files = await fs.promises.readdir(testTenantDir);
+      const testDir = callsService.getUploadsDir('tenant_rec_test');
+      if (fs.existsSync(testDir)) {
+        const files = await fs.promises.readdir(testDir);
         for (const file of files) {
-          await fs.promises.unlink(path.join(testTenantDir, file));
+          await fs.promises.unlink(path.join(testDir, file));
         }
-        await fs.promises.rmdir(testTenantDir);
+        await fs.promises.rmdir(testDir);
       }
     } catch (_) {}
   });
@@ -139,7 +152,7 @@ describe('CallsService - Recording Management and Playback Tests', () => {
     expect(session.recordingUrl).toBe('/api/calls/call_rec_001/recording/stream');
 
     // Verify file written to disk
-    const targetFile = path.join(testTenantDir, 'call_rec_001.webm');
+    const targetFile = path.join(getTestTenantDir(), 'call_rec_001.webm');
     expect(fs.existsSync(targetFile)).toBe(true);
     const content = await fs.promises.readFile(targetFile);
     expect(content.toString()).toBe('FAKE_WEBM_AUDIO_DATA_FOR_TESTING');
@@ -323,6 +336,106 @@ describe('CallsService - Recording Management and Playback Tests', () => {
 
       await expect(
         callsService.getCallForReport('call_other_tenant', mockUser),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('Recording Pipeline Security, Metadata & Retry Tests', () => {
+    it('persists structured recording metadata including size, mimeType, duration, and storage path', async () => {
+      const audioBuffer = Buffer.from('VALID_CALL_RECORDING_OPUS_AUDIO_STREAM_12345');
+      const res = await callsService.saveRecording('call_rec_001', mockUser, audioBuffer, 'audio/webm');
+
+      expect(res.status).toBe('AVAILABLE');
+      expect(res.size).toBe(audioBuffer.length);
+      expect(res.mimeType).toBe('audio/webm');
+      expect(res.metadata).toBeDefined();
+      expect(res.metadata.storagePath).toBe('tenant_rec_test/call_rec_001.webm');
+      expect(res.metadata.size).toBe(audioBuffer.length);
+
+      // Verify Prisma session received metadata
+      const session = callSessions.find((c) => c.id === 'call_rec_001');
+      expect(session.metadata.recording).toBeDefined();
+      expect(session.metadata.recording.mimeType).toBe('audio/webm');
+      expect(session.metadata.recording.size).toBe(audioBuffer.length);
+    });
+
+    it('supports upload retry on the same call session without duplicating call records', async () => {
+      const firstBuffer = Buffer.from('FIRST_ATTEMPT_AUDIO_CHUNK');
+      await callsService.saveRecording('call_rec_001', mockUser, firstBuffer, 'audio/webm');
+
+      // Retry upload with complete recording
+      const finalBuffer = Buffer.from('FULL_RECORDING_AUDIO_AFTER_RETRY_SUCCESS');
+      const retryRes = await callsService.saveRecording('call_rec_001', mockUser, finalBuffer, 'audio/webm');
+
+      expect(retryRes.status).toBe('AVAILABLE');
+      expect(retryRes.size).toBe(finalBuffer.length);
+
+      // Verify file on disk is replaced cleanly
+      const targetFile = path.join(getTestTenantDir(), 'call_rec_001.webm');
+      const diskContent = await fs.promises.readFile(targetFile);
+      expect(diskContent.toString()).toBe('FULL_RECORDING_AUDIO_AFTER_RETRY_SUCCESS');
+
+      // Verify no duplicate call records were created in the database
+      const matchingSessions = callSessions.filter((c) => c.id === 'call_rec_001');
+      expect(matchingSessions.length).toBe(1);
+    });
+
+    it('enforces strict tenant isolation: rejects saving or retrieving recording for another tenant', async () => {
+      const audioBuffer = Buffer.from('CROSS_TENANT_ATTEMPT');
+      await expect(
+        callsService.saveRecording('call_other_tenant', mockUser, audioBuffer, 'audio/webm'),
+      ).rejects.toThrow(NotFoundException);
+
+      await expect(
+        callsService.getRecordingFilePath('call_other_tenant', mockUser),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('CallsService - Call Outcome Updating & Audit Tests', () => {
+    it('successfully updates outcome to CALLBACK_REQUESTED and records audit trail', async () => {
+      const res = await callsService.updateOutcome('call_rec_001', mockUser, {
+        outcome: 'CALLBACK_REQUESTED',
+        notes: 'Customer asked for callback tomorrow morning',
+      });
+
+      expect(res.outcome).toBe('CALLBACK_REQUESTED');
+      expect(res.metadata.agentNotes).toBe('Customer asked for callback tomorrow morning');
+      expect(res.metadata.outcomeAudit).toHaveLength(1);
+      expect(res.metadata.outcomeAudit[0].newOutcome).toBe('CALLBACK_REQUESTED');
+      expect(mockAuditLogs.log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: 'call.outcome_updated',
+          entityId: 'call_rec_001',
+        }),
+      );
+    });
+
+    it('rejects manual override to PROMISE_TO_PAY without confirmed commitment or explanatory notes', async () => {
+      // call_rec_001 has no confirmed commitment
+      await expect(
+        callsService.updateOutcome('call_rec_001', mockUser, {
+          outcome: 'PROMISE_TO_PAY',
+        }),
+      ).rejects.toThrow('Cannot set outcome to PROMISE_TO_PAY without a confirmed commitment');
+    });
+
+    it('permits manual override to PROMISE_TO_PAY when explicit note is provided', async () => {
+      const res = await callsService.updateOutcome('call_rec_001', mockUser, {
+        outcome: 'PROMISE_TO_PAY',
+        notes: 'Customer confirmed verbally over call that they will transfer ₹25,000 via NEFT by tomorrow',
+      });
+
+      expect(res.outcome).toBe('PROMISE_TO_PAY');
+      expect(res.metadata.agentNotes).toContain('transfer ₹25,000 via NEFT');
+      expect(res.metadata.outcomeAudit[0].newOutcome).toBe('PROMISE_TO_PAY');
+    });
+
+    it('enforces tenant isolation on outcome updates', async () => {
+      await expect(
+        callsService.updateOutcome('call_other_tenant', mockUser, {
+          outcome: 'DISPUTE',
+        }),
       ).rejects.toThrow(NotFoundException);
     });
   });

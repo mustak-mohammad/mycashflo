@@ -5,6 +5,7 @@ import type { CustomerQueryDto } from '../common/dto/query.dto.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsString, IsEmail, IsOptional, IsEnum } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ConsentState } from '@prisma/client';
 
 export class CreateCustomerDto {
   @ApiProperty({ example: 'Raj Enterprises' })
@@ -21,6 +22,26 @@ export class CreateCustomerDto {
   @ApiPropertyOptional() @IsOptional() @IsString() gstNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() billingAddress?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  emailConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  whatsappConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  smsConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  voiceConsent?: ConsentState;
 }
 
 export class UpdateCustomerDto {
@@ -34,6 +55,26 @@ export class UpdateCustomerDto {
   @ApiPropertyOptional() @IsOptional() @IsString() notes?: string;
   @ApiPropertyOptional({ enum: ['ACTIVE', 'INACTIVE'] })
   @IsOptional() @IsEnum(['ACTIVE', 'INACTIVE']) status?: 'ACTIVE' | 'INACTIVE';
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  emailConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  whatsappConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  smsConsent?: ConsentState;
+
+  @ApiPropertyOptional({ enum: ConsentState })
+  @IsOptional()
+  @IsEnum(ConsentState)
+  voiceConsent?: ConsentState;
 }
 
 @Injectable()
@@ -150,11 +191,16 @@ export class CustomersService {
       notes = notes ? `${notes} [Ref: ${customerReference}]` : `[Ref: ${customerReference}]`;
     }
 
+    const now = new Date();
     const customer = await this.prisma.customer.create({
       data: {
         ...rest,
         notes,
         tenantId: user.tenantId,
+        ...(dto.emailConsent ? { emailConsentAt: now, emailConsentSource: 'PORTAL_CREATE' } : {}),
+        ...(dto.whatsappConsent ? { whatsappConsentAt: now, whatsappConsentSource: 'PORTAL_CREATE' } : {}),
+        ...(dto.smsConsent ? { smsConsentAt: now, smsConsentSource: 'PORTAL_CREATE' } : {}),
+        ...(dto.voiceConsent ? { voiceConsentAt: now, voiceConsentSource: 'PORTAL_CREATE' } : {}),
       },
     });
 
@@ -165,7 +211,15 @@ export class CustomersService {
         action: 'customer.created',
         entityType: 'Customer',
         entityId: customer.id,
-        metadata: { name: customer.name, email: customer.email, customerReference },
+        metadata: {
+          name: customer.name,
+          email: customer.email,
+          customerReference,
+          emailConsent: customer.emailConsent,
+          whatsappConsent: customer.whatsappConsent,
+          smsConsent: customer.smsConsent,
+          voiceConsent: customer.voiceConsent,
+        },
       });
     }
 
@@ -176,22 +230,80 @@ export class CustomersService {
   }
 
   async update(id: string, user: AuthUser, dto: UpdateCustomerDto) {
-    await this.findOne(id, user); // ensures tenant owns it
-    const { customerReference, ...rest } = dto;
+    const existing = await this.findOne(id, user); // ensures tenant owns it
+    const { customerReference, emailConsent, whatsappConsent, smsConsent, voiceConsent, ...rest } = dto;
     let notes = rest.notes;
     if (customerReference) {
       notes = notes ? `${notes} [Ref: ${customerReference}]` : `[Ref: ${customerReference}]`;
     }
 
+    const now = new Date();
+    const dataToUpdate: any = {
+      ...rest,
+      ...(notes !== undefined ? { notes } : {}),
+    };
+
+    const consentChanges: Record<string, { from: any; to: any }> = {};
+
+    if (emailConsent !== undefined && emailConsent !== (existing as any).emailConsent) {
+      dataToUpdate.emailConsent = emailConsent;
+      dataToUpdate.emailConsentAt = now;
+      dataToUpdate.emailConsentSource = 'PORTAL_UPDATE';
+      consentChanges.emailConsent = { from: (existing as any).emailConsent, to: emailConsent };
+    }
+
+    if (whatsappConsent !== undefined && whatsappConsent !== (existing as any).whatsappConsent) {
+      dataToUpdate.whatsappConsent = whatsappConsent;
+      dataToUpdate.whatsappConsentAt = now;
+      dataToUpdate.whatsappConsentSource = 'PORTAL_UPDATE';
+      consentChanges.whatsappConsent = { from: (existing as any).whatsappConsent, to: whatsappConsent };
+    }
+
+    if (smsConsent !== undefined && smsConsent !== (existing as any).smsConsent) {
+      dataToUpdate.smsConsent = smsConsent;
+      dataToUpdate.smsConsentAt = now;
+      dataToUpdate.smsConsentSource = 'PORTAL_UPDATE';
+      consentChanges.smsConsent = { from: (existing as any).smsConsent, to: smsConsent };
+    }
+
+    if (voiceConsent !== undefined && voiceConsent !== (existing as any).voiceConsent) {
+      dataToUpdate.voiceConsent = voiceConsent;
+      dataToUpdate.voiceConsentAt = now;
+      dataToUpdate.voiceConsentSource = 'PORTAL_UPDATE';
+      consentChanges.voiceConsent = { from: (existing as any).voiceConsent, to: voiceConsent };
+    }
+
     const updated = await this.prisma.customer.update({
       where: { id },
-      data: {
-        ...rest,
-        ...(notes !== undefined ? { notes } : {}),
-      },
+      data: dataToUpdate,
     });
 
     if (this.auditLogs) {
+      if (Object.keys(consentChanges).length > 0) {
+        await this.auditLogs.log({
+          tenantId: user.tenantId,
+          userId: user.userId,
+          action: 'customer.consent_updated',
+          entityType: 'Customer',
+          entityId: updated.id,
+          metadata: {
+            changes: consentChanges,
+            previous: {
+              emailConsent: (existing as any).emailConsent,
+              whatsappConsent: (existing as any).whatsappConsent,
+              smsConsent: (existing as any).smsConsent,
+              voiceConsent: (existing as any).voiceConsent,
+            },
+            updated: {
+              emailConsent: updated.emailConsent,
+              whatsappConsent: updated.whatsappConsent,
+              smsConsent: updated.smsConsent,
+              voiceConsent: updated.voiceConsent,
+            },
+          },
+        });
+      }
+
       await this.auditLogs.log({
         tenantId: user.tenantId,
         userId: user.userId,

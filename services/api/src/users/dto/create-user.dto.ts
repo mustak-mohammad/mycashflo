@@ -1,6 +1,12 @@
-import { IsEmail, IsString, IsOptional, IsEnum, MinLength } from 'class-validator';
+import { IsEmail, IsString, IsOptional, IsEnum, MinLength, Matches } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '@prisma/client';
+import {
+  PASSWORD_COMPLEXITY_MESSAGE,
+  PASSWORD_COMPLEXITY_REGEX,
+  PASSWORD_LENGTH_MESSAGE,
+  PASSWORD_MIN_LENGTH,
+} from '../../common/password-policy.js';
 
 export class CreateUserDto {
   @ApiProperty({ example: 'agent@democorp.in' })
@@ -11,9 +17,14 @@ export class CreateUserDto {
   @IsString()
   name: string;
 
-  @ApiProperty({ example: 'SecurePass123!' })
+  @ApiProperty({
+    example: 'SecurePass123!',
+    description: 'Password (minimum 8 characters with uppercase, lowercase, and at least one number or symbol)',
+    minLength: PASSWORD_MIN_LENGTH,
+  })
   @IsString()
-  @MinLength(8)
+  @MinLength(PASSWORD_MIN_LENGTH, { message: PASSWORD_LENGTH_MESSAGE })
+  @Matches(PASSWORD_COMPLEXITY_REGEX, { message: PASSWORD_COMPLEXITY_MESSAGE })
   password: string;
 
   @ApiPropertyOptional({ enum: UserRole, default: UserRole.AGENT })

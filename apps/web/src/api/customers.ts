@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { Paginated, Customer } from '../types'
+import type { Paginated, Customer, ConsentState } from '../types'
 
 export const customersApi = {
   list: (params?: { page?: number; limit?: number; search?: string; status?: string }) =>
@@ -16,6 +16,10 @@ export const customersApi = {
     customerReference?: string
     gstNumber?: string
     billingAddress?: string
+    emailConsent?: ConsentState
+    whatsappConsent?: ConsentState
+    smsConsent?: ConsentState
+    voiceConsent?: ConsentState
   }) => apiClient.post<Customer>('/customers', data).then((r) => r.data),
 
   update: (

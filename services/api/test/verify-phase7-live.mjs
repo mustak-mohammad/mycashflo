@@ -2,9 +2,15 @@
 import { spawn } from 'child_process';
 import * as crypto from 'crypto';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { PrismaClient } from '@prisma/client';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const API_DIR = path.resolve(__dirname, '..');
+
 const BASE_URL = 'http://localhost:3000/api';
+const TEST_TELEPHONY_WEBHOOK_SECRET = 'p7_test_telephony_webhook_secret_safe';
 let apiProcess = null;
 const prisma = new PrismaClient();
 
@@ -44,11 +50,24 @@ async function startServerIfNeeded() {
   }
 
   console.log('🚀 Launching API server from dist/main.js for verification...');
-  const apiDir = path.resolve('services/api');
   apiProcess = spawn('node', ['dist/main.js'], {
-    cwd: apiDir,
+    cwd: API_DIR,
     stdio: 'inherit',
-    env: { ...process.env, PORT: '3000', NODE_ENV: 'development' },
+    env: {
+      ...process.env,
+      PORT: '3000',
+      NODE_ENV: 'development',
+      ENABLE_OUTBOUND_CALLS: 'false',
+      OUTBOUND_CALLS_ENABLED: 'false',
+      AUTOMATED_REMINDERS_ENABLED: 'false',
+      EMAIL_DELIVERY_ENABLED: 'false',
+      PAYMENT_SIMULATION_MODE: 'true',
+      RAZORPAY_WEBHOOK_SECRET: 'rzp_whsec_mycashflo',
+      WHATSAPP_VERIFY_TOKEN: 'mycashflo_whatsapp_verify_token',
+      WHATSAPP_ACCESS_TOKEN: 'mock_wa_token',
+      RESEND_API_KEY: 'mock_re_key',
+      TELEPHONY_WEBHOOK_SECRET: TEST_TELEPHONY_WEBHOOK_SECRET,
+    },
   });
 
   const ready = await waitForServer(25, 1000);
@@ -69,8 +88,12 @@ async function run() {
   let failed = 0;
 
   let createdInvoiceId = null;
+  let createdCustomerId = null;
   let testCustomerId = null;
   let testPaidAmount = 0;
+  let tenantIdForCleanup = null;
+  let originalIntegrationConfigs = [];
+  const createdReplayKeys = [];
 
   function assert(condition, message) {
     if (condition) {
@@ -98,14 +121,34 @@ async function run() {
     );
     const token = loginRes.data.tokens?.accessToken;
     const authHeaders = { Authorization: `Bearer ${token}` };
+    tenantIdForCleanup = loginRes.data.user?.tenantId;
 
-    // 3. Isolated Test Fixtures: Existing customer & dedicated deterministic test invoice
-    const custRes = await request('/customers?limit=1', { headers: authHeaders });
-    assert(custRes.status === 200 && custRes.data.data?.length > 0, 'Fetch test customer succeeded');
-    const customer = custRes.data.data?.[0];
-    if (!customer) {
-      throw new Error('Verification failed: No customer found in tenant. Run database seed first.');
+    if (tenantIdForCleanup) {
+      originalIntegrationConfigs = await prisma.integrationConfig.findMany({
+        where: { tenantId: tenantIdForCleanup },
+      });
     }
+
+    // 3. Isolated Test Fixtures: synthetic customer & deterministic test invoice
+    const createCustRes = await request('/customers', {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        name: 'Phase7 Synthetic Test Client',
+        email: `p7-synth-${Date.now().toString(36)}@synthetic.test`,
+        phone: '+919999900077',
+        company: 'Synthetic Verification Pvt Ltd',
+      }),
+    });
+    const customer = createCustRes.data;
+    assert(
+      [200, 201].includes(createCustRes.status) && Boolean(customer?.id),
+      `Created isolated synthetic test customer: ${customer?.id}`,
+    );
+    if (!customer?.id) {
+      throw new Error(`Failed to create synthetic customer fixture: ${JSON.stringify(createCustRes.data)}`);
+    }
+    createdCustomerId = customer.id;
     testCustomerId = customer.id;
 
     // Create an isolated test invoice so demo and production invoices are never mutated
@@ -170,6 +213,32 @@ async function run() {
       'Save Razorpay config preserves tenant isolation and masks sensitive secrets',
     );
 
+    // Ensure WhatsApp and SIP_TELEPHONY use explicit safe mock/test credentials for this verification run
+    await request('/integrations/WHATSAPP_CLOUD', {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        config: {
+          phoneNumberId: 'phone_id_sim_test',
+          accessToken: 'EAAG_whatsapp_cloud_access_token_mock',
+          verifyToken: 'mycashflo_whatsapp_verify_token',
+        },
+        isActive: true,
+      }),
+    });
+
+    await request('/integrations/SIP_TELEPHONY', {
+      method: 'PUT',
+      headers: authHeaders,
+      body: JSON.stringify({
+        config: {
+          sipTrunkUri: 'sip.sandbox.carrier.test',
+          webhookSecret: TEST_TELEPHONY_WEBHOOK_SECRET,
+        },
+        isActive: true,
+      }),
+    });
+
     // 6. Test Connectivity Endpoints
     const testRzp = await request('/integrations/RAZORPAY/test', {
       method: 'POST',
@@ -207,30 +276,33 @@ async function run() {
       `SIP Telephony Gateway policy check: ${testTel.data.message}`,
     );
 
-    // 7. Payment Link Generation (Razorpay)
+    // 7. Payment Link Generation (Razorpay — forced simulation so zero live payment links created)
     const rzpLinkRes = await request('/payments/link', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
         invoiceId: invoice.id,
         provider: 'RAZORPAY',
+        simulate: true,
         description: 'Settlement for Overdue Invoice',
       }),
     });
     assert(
       [200, 201].includes(rzpLinkRes.status) &&
         rzpLinkRes.data.shortUrl &&
-        rzpLinkRes.data.shortUrl.includes('rzp.io'),
-      `Generated Razorpay payment link: ${rzpLinkRes.data.shortUrl} (Link ID: ${rzpLinkRes.data.paymentLinkId})`,
+        rzpLinkRes.data.shortUrl.includes('rzp.io') &&
+        rzpLinkRes.data.isSimulated === true,
+      `Generated simulated Razorpay payment link: ${rzpLinkRes.data.shortUrl} (Link ID: ${rzpLinkRes.data.paymentLinkId})`,
     );
 
-    // 8. Payment Link Generation (Stripe)
+    // 8. Payment Link Generation (Stripe — forced simulation)
     const stripeLinkRes = await request('/payments/link', {
       method: 'POST',
       headers: authHeaders,
       body: JSON.stringify({
         invoiceId: invoice.id,
         provider: 'STRIPE',
+        simulate: true,
         description: 'Global Card Settlement',
       }),
     });
@@ -309,6 +381,7 @@ async function run() {
         payload: {
           invoiceNumber: invoice.number,
           amount: invoice.amount,
+          companyContactNumber: '+919800000001',
           paymentLink: rzpLinkRes.data.shortUrl,
         },
       }),
@@ -346,18 +419,56 @@ async function run() {
       `STRICT SAFETY VERIFIED: Outbound PSTN calling is disabled by policy. Call simulated with SID ${outboundCall.data.callSid}`,
     );
 
-    // 15. Telephony Carrier Webhook
+    // 15. Telephony Carrier Webhook Security (Missing, Invalid, Valid, Replay)
+    const webhookBody = JSON.stringify({
+      CallSid: outboundCall.data.callSid,
+      CallStatus: 'completed',
+      CallDuration: '72',
+    });
+
+    const unauthTelWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      body: webhookBody,
+    });
+    assert(
+      unauthTelWebhook.status === 401,
+      `Telephony webhook rejects missing authentication with 401 (got ${unauthTelWebhook.status})`,
+    );
+
+    const invalidTelWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong_invalid_telephony_token' },
+      body: webhookBody,
+    });
+    assert(
+      invalidTelWebhook.status === 401,
+      `Telephony webhook rejects invalid authentication with 401 (got ${invalidTelWebhook.status})`,
+    );
+
     const telWebhook = await request('/calls/webhook/sip_gateway', {
       method: 'POST',
-      body: JSON.stringify({
-        CallSid: outboundCall.data.callSid,
-        CallStatus: 'completed',
-        CallDuration: '72',
-      }),
+      headers: { Authorization: `Bearer ${TEST_TELEPHONY_WEBHOOK_SECRET}` },
+      body: webhookBody,
     });
     assert(
       telWebhook.status === 200 && telWebhook.data.received === true,
-      `Telephony status callback received and reconciled (Call SID: ${telWebhook.data.callSid})`,
+      `Authenticated telephony status callback received and reconciled (Call SID: ${telWebhook.data.callSid})`,
+    );
+
+    const replayKeyHash = crypto
+      .createHash('sha256')
+      .update(`SIP_TRUNK|${webhookBody}`)
+      .digest('hex');
+    createdReplayKeys.push(`SIP_TRUNK:fp:${replayKeyHash}`);
+
+    const replayTelWebhook = await request('/calls/webhook/sip_gateway', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TEST_TELEPHONY_WEBHOOK_SECRET}` },
+      body: webhookBody,
+    });
+    assert(
+      replayTelWebhook.status === 401,
+      `Telephony webhook rejects duplicate replay attempt with 401 (got ${replayTelWebhook.status})`,
     );
 
     // 16. Audit Log Records Trail
@@ -385,22 +496,48 @@ async function run() {
       `Ageing reports operational (Overdue total: ₹${ageing.data.total})`,
     );
   } finally {
-    // Isolated Cleanup: delete test payments, delete test invoice, and restore customer balance
-    if (createdInvoiceId) {
-      try {
-        console.log('\n🧹 Performing isolated test fixture cleanup...');
+    // Isolated Cleanup: restore IntegrationConfigs and remove synthetic test fixtures only
+    try {
+      console.log('\n🧹 Performing isolated test fixture cleanup...');
+      if (createdReplayKeys.length > 0) {
+        await prisma.webhookReplay.deleteMany({ where: { replayKey: { in: createdReplayKeys } } });
+      }
+      if (createdCustomerId) {
+        await prisma.notification.deleteMany({ where: { customerId: createdCustomerId } });
+        await prisma.callSession.deleteMany({ where: { customerId: createdCustomerId } });
+      }
+      if (createdInvoiceId) {
         await prisma.payment.deleteMany({ where: { invoiceId: createdInvoiceId } });
         await prisma.invoice.deleteMany({ where: { id: createdInvoiceId } });
-        if (testPaidAmount > 0 && testCustomerId) {
-          await prisma.customer.update({
-            where: { id: testCustomerId },
-            data: { outstandingBalance: { increment: testPaidAmount } },
-          });
-        }
-        console.log('✅ Isolated test cleanup complete. Zero residue left in database.');
-      } catch (cleanErr) {
-        console.warn('Note: Non-fatal cleanup warning:', cleanErr.message);
       }
+      if (createdCustomerId) {
+        await prisma.customer.deleteMany({ where: { id: createdCustomerId } });
+      }
+      if (tenantIdForCleanup) {
+        const savedMap = new Map(originalIntegrationConfigs.map((c) => [c.provider, c]));
+        for (const prov of ['RAZORPAY', 'WHATSAPP_CLOUD', 'SIP_TELEPHONY']) {
+          const orig = savedMap.get(prov);
+          if (orig) {
+            await prisma.integrationConfig.upsert({
+              where: { provider_tenantId: { provider: prov, tenantId: tenantIdForCleanup } },
+              update: { config: orig.config, isActive: orig.isActive },
+              create: {
+                provider: orig.provider,
+                config: orig.config,
+                isActive: orig.isActive,
+                tenantId: tenantIdForCleanup,
+              },
+            });
+          } else {
+            await prisma.integrationConfig.deleteMany({
+              where: { tenantId: tenantIdForCleanup, provider: prov },
+            });
+          }
+        }
+      }
+      console.log('✅ Isolated test cleanup complete. Zero residue left in database.');
+    } catch (cleanErr) {
+      console.warn('Note: Non-fatal cleanup warning:', cleanErr.message);
     }
     await prisma.$disconnect();
 

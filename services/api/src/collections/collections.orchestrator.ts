@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
+import { evaluateCustomerConsent } from '../common/consent-policy.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { CasePriority, CaseStatus, NotificationChannel, NotifStatus } from '@prisma/client';
 
@@ -184,11 +185,25 @@ export class CollectionsOrchestrator {
         });
       }
 
-      // ── 4. Contact Permissions & [DND:NO_CONTACT] Check ────────────────────
-      const hasDndDirective =
-        (customer?.notes || '').includes('NO_CONTACT') ||
-        (customer?.notes || '').includes('[DND');
-      if (hasDndDirective || customer?.status === 'INACTIVE') {
+      // ── 4. Channel Resolution & Centralized Consent Policy Guard ──────────
+      let channelToUse: NotificationChannel = NotificationChannel.WHATSAPP;
+      if (preferredChannel === 'EMAIL') channelToUse = NotificationChannel.EMAIL;
+      else if (preferredChannel === 'SMS') channelToUse = NotificationChannel.SMS;
+      else {
+        // Auto routing: Prefer consented channel (WhatsApp if consented, otherwise Email if consented)
+        const waConsent = evaluateCustomerConsent(customer, NotificationChannel.WHATSAPP);
+        const emailConsent = evaluateCustomerConsent(customer, NotificationChannel.EMAIL);
+        if (customer.phone && waConsent.allowed) {
+          channelToUse = NotificationChannel.WHATSAPP;
+        } else if (customer.email && emailConsent.allowed) {
+          channelToUse = NotificationChannel.EMAIL;
+        } else {
+          channelToUse = customer.phone ? NotificationChannel.WHATSAPP : NotificationChannel.EMAIL;
+        }
+      }
+
+      const consentEval = evaluateCustomerConsent(customer, channelToUse);
+      if (!consentEval.allowed || customer?.status === 'INACTIVE') {
         report.suppressedDnd++;
         report.items.push({
           invoiceId: inv.id,
@@ -199,7 +214,8 @@ export class CollectionsOrchestrator {
           daysOverdue,
           priority,
           action: 'SUPPRESSED_DND',
-          reason: 'Customer has an active [DND:NO_CONTACT] directive on file',
+          channel: channelToUse,
+          reason: consentEval.reason || 'Customer is marked INACTIVE in tenant records',
         });
 
         if (!dryRun) {
@@ -209,7 +225,14 @@ export class CollectionsOrchestrator {
             action: 'collections.contact_suppressed_dnd',
             entityType: 'Customer',
             entityId: customer.id,
-            metadata: { invoiceNumber: inv.number, daysOverdue },
+            metadata: {
+              invoiceNumber: inv.number,
+              daysOverdue,
+              channel: channelToUse,
+              reason: consentEval.reason,
+              classification: consentEval.classification,
+              consentState: consentEval.consentState,
+            },
           });
         }
         continue;
@@ -263,14 +286,6 @@ export class CollectionsOrchestrator {
       }
 
       // ── 7. Action Execution / Delivery Tracking ────────────────────────────
-      let channelToUse: NotificationChannel = NotificationChannel.WHATSAPP;
-      if (preferredChannel === 'EMAIL') channelToUse = NotificationChannel.EMAIL;
-      else if (preferredChannel === 'SMS') channelToUse = NotificationChannel.SMS;
-      else {
-        // Auto routing: WhatsApp first, fallback to Email
-        channelToUse = customer.phone ? NotificationChannel.WHATSAPP : NotificationChannel.EMAIL;
-      }
-
       if (dryRun) {
         report.remindersDispatched++;
         report.items.push({

@@ -27,7 +27,15 @@ async function bootstrap() {
       },
     }),
   );
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+  app.use(
+    express.urlencoded({
+      extended: true,
+      limit: '50mb',
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
 
   // CORS — only allow the React dev server in development
   app.enableCors({

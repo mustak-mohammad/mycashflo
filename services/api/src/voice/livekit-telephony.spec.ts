@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { UnauthorizedException, BadRequestException } from '@nestjs/common';
+import {
+  UnauthorizedException,
+  BadRequestException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { VoiceService, VoiceTokenDto, AgentDispatchDto } from './voice.service.js';
 import { SipTelephonyAdapter } from '../integrations/adapters/sip-telephony.adapter.js';
@@ -26,10 +31,12 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
   };
 
   let testCallSessions: any[] = [];
+  let replayRows: any[] = [];
 
   beforeEach(() => {
     process.env.ENABLE_OUTBOUND_CALLS = 'false';
     delete process.env.OUTBOUND_CALLS_ENABLED;
+    replayRows = [];
 
     testCallSessions = [
       {
@@ -118,6 +125,51 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
           tenantId: 'tenant_livekit_01',
         }),
       },
+      webhookReplay: {
+        create: vi.fn().mockImplementation(async ({ data }) => {
+          const exists = replayRows.find((r) => r.replayKey === data.replayKey);
+          if (exists) {
+            const err: any = new Error('Unique constraint failed');
+            err.code = 'P2002';
+            throw err;
+          }
+          const rec = { id: `wr_${replayRows.length + 1}`, createdAt: new Date(), ...data };
+          replayRows.push(rec);
+          return rec;
+        }),
+        updateMany: vi.fn().mockImplementation(async ({ where, data }) => {
+          let count = 0;
+          for (const r of replayRows) {
+            if (r.replayKey === where.replayKey && r.expiresAt <= where.expiresAt.lte) {
+              Object.assign(r, data);
+              count++;
+            }
+          }
+          return { count };
+        }),
+        deleteMany: vi.fn().mockImplementation(async ({ where }) => {
+          const before = replayRows.length;
+          replayRows = replayRows.filter(
+            (r) =>
+              !(
+                (where.replayKey === undefined || r.replayKey === where.replayKey) &&
+                r.expiresAt <= where.expiresAt.lte
+              ),
+          );
+          return { count: before - replayRows.length };
+        }),
+      },
+      $transaction: vi.fn().mockImplementation(async (cb) => {
+        const snapshotSessions = testCallSessions.map((s) => ({ ...s, metadata: { ...(s.metadata || {}) } }));
+        const snapshotReplays = replayRows.map((r) => ({ ...r }));
+        try {
+          return await cb(mockPrisma);
+        } catch (err) {
+          testCallSessions = snapshotSessions;
+          replayRows = snapshotReplays;
+          throw err;
+        }
+      }),
     };
 
     mockRecorder = {
@@ -179,16 +231,11 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
       expect(highTtl.expiresIn).toBe(3600);
     });
 
-    it('should generate mock token safely when LiveKit credentials are absent', async () => {
+    it('should fail closed with ServiceUnavailableException when LiveKit credentials are absent', async () => {
       mockConfig.get.mockImplementation((k: string) => (k === 'LIVEKIT_URL' ? null : 'placeholder'));
-      const mockResult = await voiceService.generateToken(testUser, { customerId: 'cust_101' });
-
-      expect(mockResult.isMock).toBe(true);
-      expect(mockResult.token).toBeDefined();
-      // Decode base64url payload
-      const decoded = JSON.parse(Buffer.from(mockResult.token, 'base64url').toString('utf8'));
-      expect(decoded.mode).toBe('mock');
-      expect(decoded.tenantId).toBe(testUser.tenantId);
+      await expect(
+        voiceService.generateToken(testUser, { customerId: 'cust_101' }),
+      ).rejects.toThrow(ServiceUnavailableException);
     });
   });
 
@@ -212,8 +259,13 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
       expect(health.status).toBe('UNCONFIGURED');
     });
 
-    it('should safely dispatch agent in simulated mode when in non-production or mock', async () => {
-      mockConfig.get.mockImplementation((k: string) => (k === 'LIVEKIT_API_KEY' ? 'your_key' : 'placeholder'));
+    it('should safely dispatch agent in simulated mode when explicitly enabled in non-production', async () => {
+      mockConfig.get.mockImplementation((k: string) => {
+        if (k === 'LIVEKIT_API_KEY') return 'your_key';
+        if (k === 'ALLOW_DEV_LIVEKIT_SIMULATION') return 'true';
+        if (k === 'NODE_ENV') return 'test';
+        return 'placeholder';
+      });
       const dispatch = await voiceService.dispatchAgent(testUser, {
         roomName: 'mcf-test-room-99',
         agentName: 'chotu-voice-agent',
@@ -258,7 +310,7 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
       expect(result.eventType).toBe('room_started');
     });
 
-    it('should idempotently handle duplicate webhook delivery without redundant processing', async () => {
+    it('should reject duplicate webhook delivery without redundant processing', async () => {
       process.env.NODE_ENV = 'test';
       const eventPayload = {
         event: 'room_started',
@@ -271,15 +323,16 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
         'mock_valid_signature',
       );
       expect(firstDelivery.processed).toBe(true);
-      expect(firstDelivery.idempotent).toBeUndefined();
+      expect(mockPrisma.callSession.update).toHaveBeenCalledTimes(1);
 
-      const secondDelivery = await voiceService.handleLiveKitWebhook(
-        JSON.stringify(eventPayload),
-        'mock_valid_signature',
-      );
-      expect(secondDelivery.received).toBe(true);
-      expect(secondDelivery.idempotent).toBe(true);
-      expect(secondDelivery.eventId).toBe('evt_duplicate_test_100');
+      await expect(
+        voiceService.handleLiveKitWebhook(
+          JSON.stringify(eventPayload),
+          'mock_valid_signature',
+        ),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrisma.callSession.update).toHaveBeenCalledTimes(1);
     });
 
     it('should update CallSession startedAt and endedAt upon room_started and room_finished events', async () => {
@@ -366,9 +419,19 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
     });
 
     it('should synchronize carrier busy status and update CallSession metadata without ending session prematurely', async () => {
-      const callbackResult = await callsService.handleTelephonyWebhook('carrier', {
+      const twilioToken = 'twilio_test_auth_token_12345';
+      const requestUrl = 'https://api.mycashflo.test/api/calls/webhook/twilio';
+      const payload = {
         CallSid: 'session_lk_01',
         CallStatus: 'busy',
+      };
+      const signedData = `${requestUrl}CallSid${payload.CallSid}CallStatus${payload.CallStatus}`;
+      const sig = crypto.createHmac('sha1', twilioToken).update(signedData).digest('base64');
+
+      const callbackResult = await callsService.handleTelephonyWebhook('twilio', payload, {
+        headers: { 'x-twilio-signature': sig },
+        requestUrl,
+        secrets: { twilioAuthToken: twilioToken },
       });
 
       expect(callbackResult.status).toBe('busy');
@@ -380,10 +443,18 @@ describe('LiveKit Telephony & Cloud Architecture Specifications', () => {
     });
 
     it('should synchronize carrier failed and no-answer statuses', async () => {
-      const callbackResult = await callsService.handleTelephonyWebhook('carrier', {
-        CallSid: 'session_lk_01',
-        CallStatus: 'no-answer',
-      });
+      const sharedSecret = 'sip_trunk_test_secret_999';
+      const callbackResult = await callsService.handleTelephonyWebhook(
+        'sip_trunk',
+        {
+          CallSid: 'session_lk_01',
+          CallStatus: 'no-answer',
+        },
+        {
+          headers: { authorization: `Bearer ${sharedSecret}` },
+          secrets: { webhookSecret: sharedSecret },
+        },
+      );
 
       expect(callbackResult.status).toBe('no-answer');
       expect(testCallSessions[0].metadata.carrierStatus).toBe('no-answer');

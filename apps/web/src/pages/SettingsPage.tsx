@@ -1,24 +1,30 @@
 import { useState, useEffect } from 'react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useAuth } from '../store/AuthContext'
-import { getAuditLogs } from '../api/auditLogs'
 import { integrationsApi, type TestIntegrationResponse } from '../api/integrations'
-import { authApi } from '../api/auth'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { AutomatedRemindersView } from '../components/reminders/AutomatedRemindersView'
 import { PasswordInput } from '../components/ui/PasswordInput'
-import { getDisplayName } from '../utils/user'
 import type { IntegrationItem } from '../types'
-import type { AuditLog } from '../../../../packages/shared-types'
 
 import { TeamUsersView } from '../components/team/TeamUsersView'
+import { ProfileSecuritySection } from '../components/auth/ProfileSecuritySection'
+import { TenantAuditLogsView } from '../components/audit/TenantAuditLogsView'
+
+interface ProviderFieldMeta {
+  key: string
+  label: string
+  placeholder: string
+  type?: 'text' | 'password' | 'select'
+  options?: Array<{ value: string; label: string }>
+}
 
 interface ProviderMeta {
   provider: string
   title: string
   icon: string
   description: string
-  fields: { key: string; label: string; placeholder: string; type?: string }[]
+  fields: ProviderFieldMeta[]
 }
 
 const PROVIDERS: ProviderMeta[] = [
@@ -28,9 +34,9 @@ const PROVIDERS: ProviderMeta[] = [
     icon: '💳',
     description: 'UPI, Net Banking, and Cards for Indian accounts receivable.',
     fields: [
-      { key: 'keyId', label: 'Key ID', placeholder: 'rzp_live_...' },
-      { key: 'keySecret', label: 'Key Secret', placeholder: 'Secret key...', type: 'password' },
-      { key: 'webhookSecret', label: 'Webhook Secret', placeholder: 'whsec_...', type: 'password' },
+      { key: 'keyId', label: 'Key ID', placeholder: 'rzp_test_...' },
+      { key: 'keySecret', label: 'Key Secret', placeholder: 'Enter key secret', type: 'password' },
+      { key: 'webhookSecret', label: 'Webhook Secret', placeholder: 'Enter webhook secret', type: 'password' },
     ],
   },
   {
@@ -39,9 +45,9 @@ const PROVIDERS: ProviderMeta[] = [
     icon: '🌐',
     description: 'Global card checkout and multi-currency payment links.',
     fields: [
-      { key: 'publishableKey', label: 'Publishable Key', placeholder: 'pk_live_...' },
-      { key: 'secretKey', label: 'Secret Key', placeholder: 'sk_live_...', type: 'password' },
-      { key: 'webhookSecret', label: 'Webhook Secret', placeholder: 'whsec_...', type: 'password' },
+      { key: 'publishableKey', label: 'Publishable Key', placeholder: 'pk_test_...' },
+      { key: 'secretKey', label: 'Secret Key', placeholder: 'Enter secret key', type: 'password' },
+      { key: 'webhookSecret', label: 'Webhook Secret', placeholder: 'Enter webhook secret', type: 'password' },
     ],
   },
   {
@@ -51,7 +57,7 @@ const PROVIDERS: ProviderMeta[] = [
     description: 'Meta Graph API for verified reminder & commitment notifications.',
     fields: [
       { key: 'phoneNumberId', label: 'Phone Number ID', placeholder: '1092837465...' },
-      { key: 'accessToken', label: 'Permanent Access Token', placeholder: 'EAAG...', type: 'password' },
+      { key: 'accessToken', label: 'Permanent Access Token', placeholder: 'Enter access token', type: 'password' },
       { key: 'verifyToken', label: 'Webhook Verify Token', placeholder: 'mycashflo_token' },
     ],
   },
@@ -63,7 +69,7 @@ const PROVIDERS: ProviderMeta[] = [
     fields: [
       { key: 'sipTrunkUri', label: 'SIP Trunk URI', placeholder: 'sip.trunk.carrier.net' },
       { key: 'accountSid', label: 'Account SID', placeholder: 'AC_live_...' },
-      { key: 'authToken', label: 'Auth Token', placeholder: 'Auth token...', type: 'password' },
+      { key: 'authToken', label: 'Auth Token', placeholder: 'Enter auth token', type: 'password' },
     ],
   },
   {
@@ -72,91 +78,123 @@ const PROVIDERS: ProviderMeta[] = [
     icon: '✉️',
     description: 'Transactional email delivery for invoices, statements, and payment reminders.',
     fields: [
-      { key: 'apiKey', label: 'Resend API Key', placeholder: 're_123456789...', type: 'password' },
+      { key: 'apiKey', label: 'Resend API Key', placeholder: 'Enter Resend API key', type: 'password' },
       { key: 'from', label: 'Sender Address (From)', placeholder: 'myCashflo <onboarding@resend.dev>' },
       { key: 'testRecipient', label: 'Test Recipient Allowlist', placeholder: 'delivered@resend.dev' },
     ],
   },
+  {
+    provider: 'SMS_GATEWAY',
+    title: 'SMS Gateway (DLT / Carrier)',
+    icon: '📱',
+    description: 'DLT-compliant SMS configuration and safe simulation connectivity checks.',
+    fields: [
+      {
+        key: 'provider',
+        label: 'SMS Vendor',
+        placeholder: 'Select SMS vendor',
+        type: 'select',
+        options: [
+          { value: 'TWILIO', label: 'Twilio' },
+          { value: 'GUPSHUP', label: 'Gupshup' },
+          { value: 'EXOTEL', label: 'Exotel' },
+          { value: 'GENERIC_SMS', label: 'Generic SMS Gateway' },
+        ],
+      },
+      { key: 'accountSid', label: 'Account SID / API ID', placeholder: 'AC_...' },
+      { key: 'authToken', label: 'Auth Token / Secret', placeholder: 'Enter auth token', type: 'password' },
+      { key: 'senderId', label: 'DLT Sender ID (6 chars)', placeholder: 'MCASHF' },
+      { key: 'entityId', label: 'DLT Principal Entity ID', placeholder: '1101...' },
+      { key: 'templateId', label: 'DLT Content Template ID', placeholder: '1107...' },
+      { key: 'testRecipient', label: 'Test Recipient Allowlist', placeholder: '+919876543210' },
+    ],
+  },
 ]
 
+const SECRET_FIELDS_BY_PROVIDER: Record<string, Set<string>> = Object.fromEntries(
+  PROVIDERS.map((p) => [
+    p.provider,
+    new Set(p.fields.filter((f) => f.type === 'password').map((f) => f.key)),
+  ]),
+)
+
+function buildEditableAndMaskedState(items: IntegrationItem[]) {
+  const editable: Record<string, Record<string, string>> = {}
+  const maskedSecrets: Record<string, Record<string, string>> = {}
+  const active: Record<string, boolean> = {}
+
+  for (const item of items) {
+    const prov = item.provider.toUpperCase()
+    const secretSet = SECRET_FIELDS_BY_PROVIDER[prov] ?? new Set<string>()
+    const rawCfg = item.config || {}
+    editable[prov] = {}
+    maskedSecrets[prov] = {}
+    active[prov] = item.isActive
+
+    for (const [k, v] of Object.entries(rawCfg)) {
+      if (secretSet.has(k)) {
+        // Never prefill secret inputs with stored or masked credentials
+        if (typeof v === 'string' && v.trim() !== '') {
+          maskedSecrets[prov][k] = v
+        }
+      } else if (v !== undefined && v !== null) {
+        editable[prov][k] = String(v)
+      }
+    }
+  }
+
+  return { editable, maskedSecrets, active }
+}
+
 export default function SettingsPage() {
-  const { user, updateUser } = useAuth()
-  const [recentLogs, setRecentLogs] = useState<AuditLog[]>([])
-  const [totalLogs, setTotalLogs] = useState(0)
-  const [loading, setLoading] = useState(false)
+  const { user } = useAuth()
+  const isTenantAdmin = user?.role === 'ADMIN'
   const [searchParams, setSearchParams] = useSearchParams()
-  const activeTab = (searchParams.get('tab') as 'integrations' | 'reminders' | 'audit' | 'team') || 'integrations'
+  const activeTab =
+    (searchParams.get('tab') as 'integrations' | 'reminders' | 'audit' | 'team') || 'integrations'
 
   const setActiveTab = (tab: 'integrations' | 'reminders' | 'audit' | 'team') => {
     setSearchParams({ tab })
   }
 
-  // Profile display name state
-  const [profileName, setProfileName] = useState(user?.name || '')
-  const [savingProfile, setSavingProfile] = useState(false)
-  const [profileMessage, setProfileMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
-
-  useEffect(() => {
-    if (user?.name) {
-      setProfileName(user.name)
-    }
-  }, [user?.name])
-
-  const handleUpdateProfile = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const trimmed = profileName.trim()
-    if (!trimmed) {
-      setProfileMessage({ type: 'error', text: 'Display name cannot be empty.' })
-      return
-    }
-    setSavingProfile(true)
-    setProfileMessage(null)
-    try {
-      const res = await authApi.updateProfile(trimmed)
-      updateUser({ name: res.name })
-      setProfileMessage({ type: 'success', text: 'Display name updated successfully.' })
-      setTimeout(() => setProfileMessage(null), 3500)
-    } catch (err: any) {
-      setProfileMessage({
-        type: 'error',
-        text: err?.response?.data?.message || err.message || 'Failed to update display name.',
-      })
-    } finally {
-      setSavingProfile(false)
-    }
-  }
-
   // Integrations state
-  const [, setIntegrations] = useState<IntegrationItem[]>([])
+  const [loadingIntegrations, setLoadingIntegrations] = useState(true)
+  const [integrationsError, setIntegrationsError] = useState<string | null>(null)
   const [editingConfig, setEditingConfig] = useState<Record<string, Record<string, string>>>({})
+  const [storedSecretHints, setStoredSecretHints] = useState<Record<string, Record<string, string>>>({})
   const [activeStatus, setActiveStatus] = useState<Record<string, boolean>>({})
   const [savingProvider, setSavingProvider] = useState<string | null>(null)
   const [testingProvider, setTestingProvider] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, TestIntegrationResponse>>({})
   const [saveSuccess, setSaveSuccess] = useState<Record<string, string>>({})
+  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({})
 
   useEffect(() => {
-    setLoading(true)
-    Promise.all([
-      getAuditLogs({ limit: 5 }),
-      integrationsApi.list().catch(() => []),
-    ])
-      .then(([logsRes, intRes]) => {
-        setRecentLogs(logsRes.data)
-        setTotalLogs(logsRes.total)
-        setIntegrations(intRes)
-
-        const initialConfig: Record<string, Record<string, string>> = {}
-        const initialActive: Record<string, boolean> = {}
-        for (const item of intRes) {
-          initialConfig[item.provider] = item.config || {}
-          initialActive[item.provider] = item.isActive
-        }
-        setEditingConfig(initialConfig)
-        setActiveStatus(initialActive)
+    let active = true
+    void integrationsApi
+      .list()
+      .then((intRes) => {
+        if (!active) return
+        const parsed = buildEditableAndMaskedState(intRes)
+        setEditingConfig(parsed.editable)
+        setStoredSecretHints(parsed.maskedSecrets)
+        setActiveStatus(parsed.active)
+        setIntegrationsError(null)
       })
-      .catch(console.error)
-      .finally(() => setLoading(false))
+      .catch((err: unknown) => {
+        if (!active) return
+        const msg =
+          (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+          (err instanceof Error ? err.message : 'Failed to load integration configurations.')
+        setIntegrationsError(typeof msg === 'string' ? msg : 'Failed to load integration configurations.')
+      })
+      .finally(() => {
+        if (active) setLoadingIntegrations(false)
+      })
+
+    return () => {
+      active = false
+    }
   }, [])
 
   const handleFieldChange = (provider: string, field: string, value: string) => {
@@ -179,16 +217,54 @@ export default function SettingsPage() {
   const handleSave = async (provider: string) => {
     setSavingProvider(provider)
     setSaveSuccess((prev) => ({ ...prev, [provider]: '' }))
+    setProviderErrors((prev) => ({ ...prev, [provider]: '' }))
+
     try {
-      const cfg = editingConfig[provider] || {}
+      const rawCfg = editingConfig[provider] || {}
+      const secretSet = SECRET_FIELDS_BY_PROVIDER[provider] ?? new Set<string>()
+      const payloadCfg: Record<string, string> = {}
+
+      for (const [key, val] of Object.entries(rawCfg)) {
+        if (secretSet.has(key)) {
+          // Preserve existing backend secret when input is left blank
+          if (val.trim() !== '') {
+            payloadCfg[key] = val.trim()
+          }
+        } else {
+          payloadCfg[key] = val
+        }
+      }
+
       const isActive = activeStatus[provider] ?? true
-      await integrationsApi.save(provider, cfg, isActive)
+      const saved = await integrationsApi.save(provider, payloadCfg, isActive)
+
+      // Update masked hints from server response and reset secret inputs back to blank
+      const parsed = buildEditableAndMaskedState([saved])
+      setEditingConfig((prev) => ({
+        ...prev,
+        [provider]: parsed.editable[provider] || {},
+      }))
+      setStoredSecretHints((prev) => ({
+        ...prev,
+        [provider]: parsed.maskedSecrets[provider] || {},
+      }))
+      setActiveStatus((prev) => ({
+        ...prev,
+        [provider]: saved.isActive,
+      }))
+
       setSaveSuccess((prev) => ({ ...prev, [provider]: 'Configuration saved successfully!' }))
       setTimeout(() => {
         setSaveSuccess((prev) => ({ ...prev, [provider]: '' }))
       }, 3000)
-    } catch (err: any) {
-      alert(`Failed to save: ${err.message}`)
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err instanceof Error ? err.message : 'Failed to save configuration.')
+      setProviderErrors((prev) => ({
+        ...prev,
+        [provider]: typeof msg === 'string' ? msg : 'Failed to save configuration.',
+      }))
     } finally {
       setSavingProvider(null)
     }
@@ -196,11 +272,18 @@ export default function SettingsPage() {
 
   const handleTest = async (provider: string) => {
     setTestingProvider(provider)
+    setProviderErrors((prev) => ({ ...prev, [provider]: '' }))
     try {
       const res = await integrationsApi.test(provider)
       setTestResults((prev) => ({ ...prev, [provider]: res }))
-    } catch (err: any) {
-      alert(`Test failed: ${err.message}`)
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+        (err instanceof Error ? err.message : 'Connectivity test failed.')
+      setProviderErrors((prev) => ({
+        ...prev,
+        [provider]: typeof msg === 'string' ? msg : 'Connectivity test failed.',
+      }))
     } finally {
       setTestingProvider(null)
     }
@@ -208,10 +291,13 @@ export default function SettingsPage() {
 
   return (
     <div className="p-6 max-w-5xl mx-auto space-y-6">
-      <PageHeader title="Settings & Integrations" subtitle="Tenant adapters, team roles, carrier gateways, and compliance audit trail" />
+      <PageHeader
+        title="Settings & Integrations"
+        subtitle="Tenant adapters, team roles, carrier gateways, and compliance audit trail"
+      />
 
       {/* Navigation Tabs */}
-      <div className="flex items-center gap-2 border-b border-white/10 pb-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-white/10 pb-2">
         <button
           type="button"
           onClick={() => setActiveTab('integrations')}
@@ -223,17 +309,19 @@ export default function SettingsPage() {
         >
           🔌 Provider Adapters
         </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab('team')}
-          className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all ${
-            activeTab === 'team'
-              ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25'
-              : 'text-white/60 hover:text-white hover:bg-white/5'
-          }`}
-        >
-          👥 Team & Roles
-        </button>
+        {isTenantAdmin && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('team')}
+            className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer transition-all ${
+              activeTab === 'team'
+                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25'
+                : 'text-white/60 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            👥 Team &amp; Roles
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setActiveTab('reminders')}
@@ -261,318 +349,279 @@ export default function SettingsPage() {
 
       {activeTab === 'reminders' ? (
         <AutomatedRemindersView />
+      ) : activeTab === 'audit' ? (
+        <TenantAuditLogsView />
       ) : activeTab === 'team' ? (
-        <TeamUsersView />
+        isTenantAdmin ? (
+          <TeamUsersView />
+        ) : (
+          <div
+            role="alert"
+            className="rounded-2xl p-6 text-center space-y-2 border border-amber-800/50 bg-amber-950/20"
+          >
+            <h2 className="text-sm font-semibold text-white">Tenant Administrator Access Required</h2>
+            <p className="text-xs text-slate-300 max-w-md mx-auto">
+              User and role management is restricted to Tenant Administrators (ADMIN). Managers can
+              manage integrations, automated reminders, audit logs, and personal profile settings.
+            </p>
+          </div>
+        )
       ) : (
         <div className="space-y-6">
-          {/* Profile */}
-        <div className="rounded-2xl p-6" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-sm font-semibold text-white">User Profile & Identity</h2>
-              <p className="text-xs text-white/50 mt-0.5">Manage your personal profile display name and credentials.</p>
-            </div>
-            <span
-              className="text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider"
-              style={
-                user?.role === 'SUPER_ADMIN'
-                  ? { background: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }
-                  : user?.role === 'ADMIN'
-                  ? { background: 'rgba(99, 102, 241, 0.2)', color: '#818cf8', border: '1px solid rgba(99, 102, 241, 0.3)' }
-                  : user?.role === 'MANAGER'
-                  ? { background: 'rgba(245, 158, 11, 0.2)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }
-                  : { background: 'rgba(16, 185, 129, 0.2)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }
-              }
-            >
-              {user?.role}
-            </span>
-          </div>
+          <ProfileSecuritySection />
 
-          {profileMessage && (
-            <div
-              className={`mb-4 p-3 rounded-xl text-xs flex items-center justify-between ${
-                profileMessage.type === 'success'
-                  ? 'bg-emerald-950/40 border border-emerald-800 text-emerald-300'
-                  : 'bg-rose-950/40 border border-rose-800 text-rose-300'
-              }`}
-            >
-              <span>{profileMessage.text}</span>
-              <button
-                type="button"
-                onClick={() => setProfileMessage(null)}
-                className="text-xs opacity-70 hover:opacity-100"
-              >
-                ✕
-              </button>
-            </div>
-          )}
-
-          <form onSubmit={handleUpdateProfile} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* External Provider Integrations Bench */}
+          <div
+            className="rounded-2xl p-6 space-y-6"
+            style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <label className="block text-xs font-medium mb-1 text-white/70">
-                  Display Name
-                </label>
-                <input
-                  type="text"
-                  value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                  placeholder={getDisplayName(user) || 'e.g. Ramesh Kumar'}
-                  className="w-full px-3 py-2 rounded-lg text-sm text-white bg-black/40 border border-white/10 focus:outline-none focus:border-indigo-500"
-                />
-                {!user?.name?.trim() && (
-                  <p className="text-[11px] mt-1 text-white/40">
-                    Active fallback: <span className="text-indigo-300 font-medium">{getDisplayName(user)}</span> (derived from email)
-                  </p>
-                )}
+                <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <span>🔌</span> External Provider Adapters
+                </h2>
+                <p className="text-xs text-white/50 mt-1">
+                  Configure provider credentials or test safely in sandbox/simulation mode. Stored secrets remain masked and preserved unless replaced.
+                </p>
               </div>
-
-              <div>
-                <label className="block text-xs font-medium mb-1 text-white/70">
-                  Email Address (Read-only)
-                </label>
-                <input
-                  type="email"
-                  readOnly
-                  disabled
-                  value={user?.email || ''}
-                  className="w-full px-3 py-2 rounded-lg text-sm text-white/60 bg-white/[0.02] border border-white/5 cursor-not-allowed"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-                <dt className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Assigned Role</dt>
-                <dd className="text-xs text-white mt-0.5 font-medium">{user?.role ?? '—'}</dd>
-              </div>
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-                <dt className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Tenant ID</dt>
-                <dd className="text-xs text-white mt-0.5 font-mono truncate">{user?.tenantId ?? '—'}</dd>
-              </div>
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/5">
-                <dt className="text-[11px]" style={{ color: 'var(--text-muted)' }}>Current Display</dt>
-                <dd className="text-xs text-white mt-0.5 font-medium truncate">{getDisplayName(user)}</dd>
-              </div>
-              <div className="flex items-end">
+              <div className="flex items-center gap-2">
                 <button
-                  type="submit"
-                  disabled={savingProfile || !profileName.trim()}
-                  className="w-full py-2 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium cursor-pointer shadow-md shadow-indigo-600/20 transition-all"
+                  type="button"
+                  onClick={() => setActiveTab('audit')}
+                  className="px-3 py-1 rounded-full text-xs font-medium bg-indigo-950/60 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-800/60 cursor-pointer"
                 >
-                  {savingProfile ? 'Saving...' : 'Save Display Name'}
+                  📜 View Audit Trail
                 </button>
               </div>
             </div>
-          </form>
-        </div>
 
-        {/* Phase 7: Provider Integrations Bench */}
-        <div className="rounded-2xl p-6 space-y-6" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <span>🔌</span> External Provider Adapters (Phase 7)
-              </h2>
-              <p className="text-xs text-white/50 mt-1">
-                Configure live API credentials or operate seamlessly in verified sandbox/simulation mode.
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-emerald-950/60 text-emerald-400 border border-emerald-800">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                Adapters Ready
-              </span>
-            </div>
-          </div>
+            {integrationsError && (
+              <div
+                role="alert"
+                className="p-3 rounded-xl text-xs bg-rose-950/40 border border-rose-800 text-rose-300"
+              >
+                ⚠️ {integrationsError}
+              </div>
+            )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-            {PROVIDERS.map((p) => {
-              const currentCfg = editingConfig[p.provider] || {}
-              const isActive = activeStatus[p.provider] ?? false
-              const isSaving = savingProvider === p.provider
-              const isTesting = testingProvider === p.provider
-              const testResult = testResults[p.provider]
-              const successMsg = saveSuccess[p.provider]
-
-              return (
-                <div
-                  key={p.provider}
-                  className="rounded-xl p-5 flex flex-col justify-between"
-                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
-                >
-                  <div className="space-y-4">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className="text-2xl p-2 rounded-xl bg-white/[0.04] border border-white/5">{p.icon}</span>
-                        <div>
-                          <h3 className="text-sm font-semibold text-white">{p.title}</h3>
-                          <p className="text-xs text-white/50 mt-0.5">{p.description}</p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleToggleActive(p.provider)}
-                        className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer transition-colors ${
-                          isActive
-                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                            : 'bg-white/5 text-white/40 border border-white/10'
-                        }`}
-                      >
-                        {isActive ? 'Active' : 'Disabled'}
-                      </button>
-                    </div>
-
-                    {/* Safety Banner for SIP Telephony */}
-                    {p.provider === 'SIP_TELEPHONY' && (
-                      <div className="p-2.5 rounded-lg text-xs bg-indigo-950/40 border border-indigo-800/60 text-indigo-300 flex items-center gap-2">
-                        <span>🛡️</span>
-                        <span>
-                          <strong>Strict Safety Guard Active:</strong> Real outbound PSTN calling is policy-disabled. Telephony sessions run safely in sandbox simulation.
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Inputs */}
-                    <div className="space-y-2.5 pt-1">
-                      {p.fields.map((f) => (
-                        <div key={f.key}>
-                          <label className="block text-xs font-medium text-white/70 mb-1">{f.label}</label>
-                          {f.type === 'password' ? (
-                            <PasswordInput
-                              value={currentCfg[f.key] || ''}
-                              onChange={(e) => handleFieldChange(p.provider, f.key, e.target.value)}
-                              placeholder={f.placeholder}
-                              className="w-full px-3 py-1.5 text-xs rounded-lg text-white font-mono bg-white/[0.04] border border-white/10 focus:border-indigo-500 focus:outline-none"
-                            />
-                          ) : (
-                            <input
-                              type={f.type || 'text'}
-                              value={currentCfg[f.key] || ''}
-                              onChange={(e) => handleFieldChange(p.provider, f.key, e.target.value)}
-                              placeholder={f.placeholder}
-                              className="w-full px-3 py-1.5 text-xs rounded-lg text-white font-mono bg-white/[0.04] border border-white/10 focus:border-indigo-500 focus:outline-none"
-                            />
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Test Results Output */}
-                    {testResult && (
-                      <div
-                        className={`p-3 rounded-lg text-xs border ${
-                          testResult.isSimulated
-                            ? 'bg-amber-950/40 border-amber-800 text-amber-300'
-                            : 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
-                        }`}
-                      >
-                        <div className="font-semibold flex items-center gap-1.5">
-                          <span>{testResult.isSimulated ? '🧪' : '✅'}</span>
-                          <span>{testResult.message}</span>
-                        </div>
-                        {testResult.sampleUrl && (
-                          <div className="mt-1 text-[11px] text-white/60 truncate">
-                            URL: <a href={testResult.sampleUrl} target="_blank" rel="noreferrer" className="text-indigo-400 underline">{testResult.sampleUrl}</a>
-                          </div>
-                        )}
-                        {testResult.messageId && (
-                          <div className="mt-1 text-[11px] text-white/60 truncate">
-                            Message ID: <span className="font-mono">{testResult.messageId}</span>
-                          </div>
-                        )}
-                        {testResult.callSid && (
-                          <div className="mt-1 text-[11px] text-white/60 truncate">
-                            Call SID: <span className="font-mono">{testResult.callSid}</span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {successMsg && (
-                      <div className="p-2 rounded-lg text-xs bg-emerald-950/40 border border-emerald-800 text-emerald-400">
-                        ✓ {successMsg}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Action Buttons */}
-                  <div className="pt-4 flex items-center justify-end gap-2 border-t border-white/5 mt-4">
-                    <button
-                      type="button"
-                      onClick={() => handleTest(p.provider)}
-                      disabled={isTesting}
-                      className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer disabled:opacity-50"
-                    >
-                      {isTesting ? 'Testing…' : '⚡ Test Connection'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleSave(p.provider)}
-                      disabled={isSaving}
-                      className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 cursor-pointer disabled:opacity-50"
-                    >
-                      {isSaving ? 'Saving…' : 'Save Config'}
-                    </button>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-
-        {/* Compliance & Audit Logs */}
-        <div className="rounded-2xl p-6" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                <span>📜</span> Tenant Audit Trail & Compliance
-              </h2>
-              <p className="text-xs text-white/50 mt-1">
-                Strict multi-tenant security log tracking all ledger mutations, payment links, and carrier events.
-              </p>
-            </div>
-            <Link
-              to="/intelligence"
-              className="px-3 py-1.5 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/30 text-xs transition-colors no-underline font-medium"
-            >
-              Open Full Audit Explorer →
-            </Link>
-          </div>
-
-          <div className="overflow-x-auto">
-            {loading ? (
-              <div className="py-6 text-center text-xs text-white/40">Loading audit records...</div>
-            ) : recentLogs.length === 0 ? (
-              <div className="py-6 text-center text-xs text-white/40">No audit logs recorded yet.</div>
+            {loadingIntegrations ? (
+              <div className="py-10 text-center text-xs text-white/50">
+                Loading tenant integration configurations…
+              </div>
             ) : (
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-white/10 text-white/40 uppercase">
-                    <th className="py-2">Time</th>
-                    <th className="py-2">Action</th>
-                    <th className="py-2">Entity</th>
-                    <th className="py-2">Details</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {recentLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-white/[0.02]">
-                      <td className="py-2 text-white/50">{new Date(log.createdAt).toLocaleTimeString()}</td>
-                      <td className="py-2 font-mono text-indigo-400">{log.action}</td>
-                      <td className="py-2 text-white/70">{log.entityType ?? '—'}</td>
-                      <td className="py-2 text-white/50 max-w-xs truncate">{log.metadata ? JSON.stringify(log.metadata) : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                {PROVIDERS.map((p) => {
+                  const currentCfg = editingConfig[p.provider] || {}
+                  const secretHints = storedSecretHints[p.provider] || {}
+                  const isActive = activeStatus[p.provider] ?? false
+                  const isSaving = savingProvider === p.provider
+                  const isTesting = testingProvider === p.provider
+                  const testResult = testResults[p.provider]
+                  const successMsg = saveSuccess[p.provider]
+                  const errMsg = providerErrors[p.provider]
+
+                  return (
+                    <div
+                      key={p.provider}
+                      data-testid={`provider-card-${p.provider}`}
+                      className="rounded-xl p-5 flex flex-col justify-between"
+                      style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+                    >
+                      <div className="space-y-4">
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="text-2xl p-2 rounded-xl bg-white/[0.04] border border-white/5">
+                              {p.icon}
+                            </span>
+                            <div>
+                              <h3 className="text-sm font-semibold text-white">{p.title}</h3>
+                              <p className="text-xs text-white/50 mt-0.5">{p.description}</p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleActive(p.provider)}
+                            className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer transition-colors ${
+                              isActive
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : 'bg-white/5 text-white/40 border border-white/10'
+                            }`}
+                          >
+                            {isActive ? 'Active' : 'Disabled'}
+                          </button>
+                        </div>
+
+                        {/* Safety Banner for SIP Telephony */}
+                        {p.provider === 'SIP_TELEPHONY' && (
+                          <div className="p-2.5 rounded-lg text-xs bg-indigo-950/40 border border-indigo-800/60 text-indigo-300 flex items-center gap-2">
+                            <span>🛡️</span>
+                            <span>
+                              <strong>Strict Safety Guard Active:</strong> Real outbound PSTN calling is policy-disabled. Telephony sessions run safely in sandbox simulation.
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Safety & Support Notice for SMS Gateway */}
+                        {p.provider === 'SMS_GATEWAY' && (
+                          <div className="p-2.5 rounded-lg text-xs bg-amber-950/30 border border-amber-800/50 text-amber-200 flex items-start gap-2">
+                            <span>🛡️</span>
+                            <span>
+                              <strong>Simulation &amp; Test Mode:</strong> Configuration &amp; DLT metadata are stored securely with masked secrets. Live external carrier HTTP transport is not enabled; connectivity checks execute in safe simulation mode.
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Inputs */}
+                        <div className="space-y-2.5 pt-1">
+                          {p.fields.map((f) => {
+                            const inputId = `${p.provider.toLowerCase()}-${f.key}`
+                            const maskedHint = secretHints[f.key]
+                            return (
+                              <div key={f.key}>
+                                <div className="flex items-center justify-between mb-1">
+                                  <label
+                                    htmlFor={inputId}
+                                    className="block text-xs font-medium text-white/70"
+                                  >
+                                    {f.label}
+                                  </label>
+                                  {f.type === 'password' && maskedHint && (
+                                    <span className="text-[10px] font-mono text-emerald-300 bg-emerald-950/50 border border-emerald-800/50 px-1.5 py-0.5 rounded">
+                                      Stored: {maskedHint}
+                                    </span>
+                                  )}
+                                </div>
+                                {f.type === 'password' ? (
+                                  <PasswordInput
+                                    id={inputId}
+                                    value={currentCfg[f.key] || ''}
+                                    onChange={(e) => handleFieldChange(p.provider, f.key, e.target.value)}
+                                    placeholder={
+                                      maskedHint
+                                        ? 'Leave blank to keep stored credential'
+                                        : f.placeholder
+                                    }
+                                    autoComplete="new-password"
+                                    className="w-full px-3 py-1.5 text-xs rounded-lg text-white font-mono bg-white/[0.04] border border-white/10 focus:border-indigo-500 focus:outline-none"
+                                  />
+                                ) : f.type === 'select' && f.options ? (
+                                  <select
+                                    id={inputId}
+                                    value={currentCfg[f.key] || f.options[0].value}
+                                    onChange={(e) => handleFieldChange(p.provider, f.key, e.target.value)}
+                                    className="w-full px-3 py-1.5 text-xs rounded-lg text-white font-mono bg-slate-900 border border-white/10 focus:border-indigo-500 focus:outline-none"
+                                  >
+                                    {f.options.map((opt) => (
+                                      <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    id={inputId}
+                                    type="text"
+                                    value={currentCfg[f.key] || ''}
+                                    onChange={(e) => handleFieldChange(p.provider, f.key, e.target.value)}
+                                    placeholder={f.placeholder}
+                                    className="w-full px-3 py-1.5 text-xs rounded-lg text-white font-mono bg-white/[0.04] border border-white/10 focus:border-indigo-500 focus:outline-none"
+                                  />
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+
+                        {/* Test Results Output */}
+                        {testResult && (() => {
+                          const isFailure =
+                            testResult.status === 'FAILED' || testResult.status === 'ERROR'
+                          return (
+                            <div
+                              className={`p-3 rounded-lg text-xs border ${
+                                isFailure
+                                  ? 'bg-rose-950/40 border-rose-800 text-rose-300'
+                                  : testResult.isSimulated
+                                  ? 'bg-amber-950/40 border-amber-800 text-amber-300'
+                                  : 'bg-emerald-950/40 border-emerald-800 text-emerald-300'
+                              }`}
+                            >
+                              <div className="font-semibold flex items-center gap-1.5">
+                                <span>{isFailure ? '❌' : testResult.isSimulated ? '🧪' : '✅'}</span>
+                                <span>{testResult.message}</span>
+                              </div>
+                            {testResult.sampleUrl && (
+                              <div className="mt-1 text-[11px] text-white/60 truncate">
+                                URL:{' '}
+                                <a
+                                  href={testResult.sampleUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-indigo-400 underline"
+                                >
+                                  {testResult.sampleUrl}
+                                </a>
+                              </div>
+                            )}
+                            {testResult.messageId && (
+                              <div className="mt-1 text-[11px] text-white/60 truncate">
+                                Message ID: <span className="font-mono">{testResult.messageId}</span>
+                              </div>
+                            )}
+                            {testResult.callSid && (
+                              <div className="mt-1 text-[11px] text-white/60 truncate">
+                                Call SID: <span className="font-mono">{testResult.callSid}</span>
+                              </div>
+                            )}
+                          </div>
+                          )
+                        })()}
+
+                        {errMsg && (
+                          <div
+                            role="alert"
+                            className="p-2 rounded-lg text-xs bg-rose-950/40 border border-rose-800 text-rose-300"
+                          >
+                            ⚠️ {errMsg}
+                          </div>
+                        )}
+
+                        {successMsg && (
+                          <div
+                            role="status"
+                            className="p-2 rounded-lg text-xs bg-emerald-950/40 border border-emerald-800 text-emerald-400"
+                          >
+                            ✓ {successMsg}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Action Buttons */}
+                      <div className="pt-4 flex items-center justify-end gap-2 border-t border-white/5 mt-4">
+                        <button
+                          type="button"
+                          onClick={() => handleTest(p.provider)}
+                          disabled={isTesting}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white/70 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 cursor-pointer disabled:opacity-50"
+                        >
+                          {isTesting ? 'Testing…' : '⚡ Test Connection'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSave(p.provider)}
+                          disabled={isSaving}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 cursor-pointer disabled:opacity-50"
+                        >
+                          {isSaving ? 'Saving…' : 'Save Config'}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             )}
           </div>
-          <div className="mt-3 text-right text-xs text-white/40">
-            Total tenant audit entries: {totalLogs}
-          </div>
         </div>
-      </div>
       )}
     </div>
   )

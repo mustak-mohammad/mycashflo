@@ -140,12 +140,13 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
     return `${clean.slice(0, 3)}****${clean.slice(-4)}`;
   }
 
-  private sanitizeSecretString(str: string): string {
-    if (!str) return str;
+  private sanitizeSecretString(str: any): string {
+    if (typeof str !== 'string') return String(str || '');
     return str
-      .replace(/EAAG[A-Za-z0-9_-]+/g, '[REDACTED_ACCESS_TOKEN]')
+      .replace(/EAA[A-Za-z0-9_-]+/g, '[REDACTED_ACCESS_TOKEN]')
       .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]');
+      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]')
+      .replace(/((?:access_token|secret)=)[^\s&,;'"]+/gi, '$1[REDACTED]');
   }
 
   /**
@@ -370,6 +371,7 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
           provider: 'WHATSAPP_CLOUD',
           status: 'FAILED',
           isSimulated: true,
+          error: contactVal.reason,
           raw: {
             safetyGuard: true,
             failed: true,
@@ -413,6 +415,7 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
             Authorization: `Bearer ${accessToken}`,
           },
           body: JSON.stringify(messagePayload),
+          signal: AbortSignal.timeout(15000),
         });
 
         if (response.ok) {
@@ -427,7 +430,7 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
           };
         }
 
-        // Meta returned an error status (e.g. 400 Bad Request, 404 Template Not Found)
+        // Meta returned an error status (e.g. 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 429 Rate Limit, 500 Server Error)
         let errorData: any = null;
         try {
           errorData = await response.json();
@@ -435,36 +438,61 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
           errorData = { error: { message: `HTTP ${response.status} from WhatsApp Cloud API` } };
         }
 
-        const safeErrMsg = this.sanitizeSecretString(
-          errorData?.error?.message || `WhatsApp Cloud API returned ${response.status}`,
-        );
+        const rawErrMsg =
+          errorData?.error?.message || `WhatsApp Cloud API returned HTTP ${response.status}`;
+        const safeErrMsg = this.sanitizeSecretString(rawErrMsg);
         const errorCode = errorData?.error?.code;
+        const errorSubcode = errorData?.error?.error_subcode;
+        const fbtraceId = errorData?.error?.fbtrace_id;
 
-        this.logger.warn(
-          `WhatsApp Cloud API returned ${response.status}${errorCode ? ` (code: ${errorCode})` : ''}: ${safeErrMsg}. Falling back to simulation mode.`,
+        this.logger.error(
+          `WhatsApp Cloud API error (HTTP ${response.status}${errorCode ? `, code: ${errorCode}` : ''}): ${safeErrMsg}`,
         );
 
         return {
-          messageId,
+          messageId: `wamid.failed.${Date.now()}`,
           provider: 'WHATSAPP_CLOUD',
-          status: 'DELIVERED',
-          isSimulated: true,
+          status: 'FAILED',
+          isSimulated: false,
+          error: safeErrMsg,
           raw: {
-            simulated: true,
-            status: response.status,
-            error: safeErrMsg,
+            httpStatus: response.status,
             errorCode,
+            errorSubcode,
+            fbtraceId,
+            error: safeErrMsg,
+            template: input.template,
+            timestamp: new Date().toISOString(),
+            errorData: typeof errorData === 'object' && errorData !== null ? errorData : undefined,
+          },
+        };
+      } catch (err: any) {
+        const isTimeout =
+          err?.name === 'TimeoutError' || err?.name === 'AbortError' || err?.code === 'ETIMEDOUT';
+        const rawMsg = isTimeout
+          ? 'WhatsApp Cloud API request timed out'
+          : err?.message || 'Network error communicating with WhatsApp Cloud API';
+        const safeMsg = this.sanitizeSecretString(rawMsg);
+        this.logger.error(`WhatsApp Cloud API dispatch network failure: ${safeMsg}`);
+
+        return {
+          messageId: `wamid.err.${Date.now()}`,
+          provider: 'WHATSAPP_CLOUD',
+          status: 'FAILED',
+          isSimulated: false,
+          error: safeMsg,
+          raw: {
+            networkError: true,
+            isTimeout: Boolean(isTimeout),
+            error: safeMsg,
             template: input.template,
             timestamp: new Date().toISOString(),
           },
         };
-      } catch (err: any) {
-        const safeMsg = this.sanitizeSecretString(err.message);
-        this.logger.warn(`WhatsApp Cloud API request failed: ${safeMsg}. Falling back to simulation mode.`);
       }
     }
 
-    // Safe simulation mode fallback
+    // Safe simulation mode fallback (only when live credentials are not configured)
     return {
       messageId,
       provider: 'WHATSAPP_CLOUD',
@@ -485,7 +513,12 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
     challenge: string,
     configuredToken?: string,
   ): string | null {
-    const verifyToken = configuredToken || process.env.WHATSAPP_VERIFY_TOKEN || 'mycashflo_whatsapp_verify_token';
+    const isProd = process.env.NODE_ENV === 'production';
+    const verifyToken =
+      configuredToken ||
+      process.env.WHATSAPP_VERIFY_TOKEN ||
+      (isProd ? '' : 'mycashflo_whatsapp_verify_token');
+    if (!verifyToken) return null;
     if (mode === 'subscribe' && token === verifyToken) {
       return challenge;
     }
@@ -493,8 +526,19 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
   }
 
   verifyWebhookSignature(payload: any, signature: string, secret?: string): boolean {
-    const appSecret = secret || process.env.WHATSAPP_APP_SECRET || 'whatsapp_app_secret_demo';
+    const isProd = process.env.NODE_ENV === 'production';
     if (!signature) return false;
+
+    const isSimSig = signature === 'mock_valid_signature' || signature.startsWith('sim_');
+    if (isProd && isSimSig) {
+      return false;
+    }
+
+    const appSecret =
+      secret || process.env.WHATSAPP_APP_SECRET || (isProd ? '' : 'whatsapp_app_secret_demo');
+    if (!appSecret) {
+      return false;
+    }
 
     const rawBody = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
@@ -503,7 +547,7 @@ export class WhatsAppCloudAdapter implements MessagingAdapter {
     try {
       return crypto.timingSafeEqual(Buffer.from(signatureHash), Buffer.from(expected));
     } catch {
-      return signature === 'mock_valid_signature' || signature.startsWith('sim_');
+      return !isProd && isSimSig;
     }
   }
 

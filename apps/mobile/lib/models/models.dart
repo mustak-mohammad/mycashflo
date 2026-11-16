@@ -318,4 +318,84 @@ class TelephonyCallSession {
   }
 }
 
+// ── Document Delivery Models ──────────────────────────────────────────────────
+
+class DeliveryAttemptItem {
+  final String id;
+  final String channel;
+  final String destinationMasked;
+  final String status;
+  final String provider;
+  final String? errorMessage;
+  final String? sentAt;
+  final String? deliveredAt;
+
+  DeliveryAttemptItem({
+    required this.id,
+    required this.channel,
+    required this.destinationMasked,
+    required this.status,
+    required this.provider,
+    this.errorMessage,
+    this.sentAt,
+    this.deliveredAt,
+  });
+
+  factory DeliveryAttemptItem.fromJson(Map<String, dynamic> json) {
+    return DeliveryAttemptItem(
+      id: json['id'] ?? '',
+      channel: json['channel'] ?? 'WHATSAPP',
+      destinationMasked: json['destinationMasked'] ?? '****',
+      status: json['status'] ?? 'PENDING',
+      provider: json['provider'] ?? 'SIMULATOR',
+      errorMessage: json['errorMessage'],
+      sentAt: json['sentAt'],
+      deliveredAt: json['deliveredAt'],
+    );
+  }
+}
+
+class DocumentDeliveryRequestItem {
+  final String id;
+  final String customerId;
+  final String invoiceId;
+  final String requestType;
+  final String deliveryChannel;
+  final String status;
+  final String requestedBy;
+  final String requestedAt;
+  final List<DeliveryAttemptItem> attempts;
+
+  DocumentDeliveryRequestItem({
+    required this.id,
+    required this.customerId,
+    required this.invoiceId,
+    required this.requestType,
+    required this.deliveryChannel,
+    required this.status,
+    required this.requestedBy,
+    required this.requestedAt,
+    required this.attempts,
+  });
+
+  factory DocumentDeliveryRequestItem.fromJson(Map<String, dynamic> json) {
+    var rawAttempts = json['attempts'] as List? ?? [];
+    List<DeliveryAttemptItem> parsedAttempts = rawAttempts
+        .map((a) => DeliveryAttemptItem.fromJson(a as Map<String, dynamic>))
+        .toList();
+
+    return DocumentDeliveryRequestItem(
+      id: json['id'] ?? '',
+      customerId: json['customerId'] ?? '',
+      invoiceId: json['invoiceId'] ?? '',
+      requestType: json['requestType'] ?? 'INVOICE',
+      deliveryChannel: json['deliveryChannel'] ?? 'WHATSAPP_AND_EMAIL',
+      status: json['status'] ?? 'PENDING',
+      requestedBy: json['requestedBy'] ?? 'VOICE_AGENT',
+      requestedAt: json['requestedAt'] ?? '',
+      attempts: parsedAttempts,
+    );
+  }
+}
+
 

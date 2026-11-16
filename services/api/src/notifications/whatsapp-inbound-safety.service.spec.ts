@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ConsentState } from '@prisma/client';
 import {
   WhatsAppInboundSafetyService,
   phonesMatch,
@@ -205,10 +206,15 @@ describe('WhatsAppInboundSafetyService', () => {
         expect.objectContaining({
           where: { id: 'cust_opt_1' },
           data: expect.objectContaining({
+            whatsappConsent: ConsentState.OPTED_OUT,
+            whatsappConsentSource: 'INBOUND_WHATSAPP_STOP',
             notes: expect.stringContaining('[DND:NO_CONTACT - WhatsApp Opt-Out'),
           }),
         }),
       );
+      const updateData = mockPrisma.customer.update.mock.calls[0][0].data;
+      expect(updateData.emailConsent).toBeUndefined();
+      expect(updateData.smsConsent).toBeUndefined();
 
       expect(mockAuditLogs.log).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -346,6 +352,185 @@ describe('WhatsAppInboundSafetyService', () => {
       // Side-effects must NOT be executed twice
       expect(mockPrisma.customer.update).toHaveBeenCalledTimes(1);
       expect(mockAuditLogs.log).toHaveBeenCalledTimes(1);
+    });
+
+    it('suppresses duplicate delivery across process restarts via persistent database webhookReplay', async () => {
+      const storedReplays = new Set<string>();
+      mockPrisma.webhookReplay = {
+        create: vi.fn().mockImplementation(async ({ data }) => {
+          if (storedReplays.has(data.replayKey)) {
+            const err: any = new Error('Unique constraint failed');
+            err.code = 'P2002';
+            throw err;
+          }
+          storedReplays.add(data.replayKey);
+          return { id: 'rep_1', ...data };
+        }),
+        deleteMany: vi.fn().mockImplementation(async ({ where }) => {
+          if (where?.expiresAt?.lte) {
+            // Active unexpired keys are NOT deleted
+            return { count: 0 };
+          }
+          if (where?.replayKey) storedReplays.delete(where.replayKey);
+          return { count: 1 };
+        }),
+      };
+
+      mockPrisma.customer.findMany.mockResolvedValue([
+        {
+          id: 'cust_restart',
+          name: 'Restart Test Corp',
+          phone: '+91 96189 54429',
+          tenantId: 'tenant_1',
+          whatsappConsent: 'UNKNOWN',
+        },
+      ]);
+      mockPrisma.customer.findUnique = vi.fn().mockResolvedValue({
+        id: 'cust_restart',
+        name: 'Restart Test Corp',
+        phone: '+91 96189 54429',
+        tenantId: 'tenant_1',
+        whatsappConsent: 'UNKNOWN',
+      });
+      mockPrisma.$transaction = vi.fn().mockImplementation(async (cb) => cb(mockPrisma));
+
+      const event: InboundMessageEvent = {
+        messageId: 'wamid.persistent_restart_01',
+        senderPhone: '919618954429',
+        type: 'text',
+        text: 'STOP',
+        timestamp: new Date(),
+      };
+
+      // 1. Initial delivery succeeds and claims persistent key
+      const res1 = await service.processInboundMessage(event);
+      expect(res1.isDuplicate).toBe(false);
+      expect(storedReplays.has('wa_in_wamid.persistent_restart_01')).toBe(true);
+      expect(mockPrisma.customer.update).toHaveBeenCalledTimes(1);
+
+      // 2. Simulate complete process restart (clearing in-memory cache)
+      service.clearCache();
+
+      // 3. Re-delivery arrives in new process
+      const res2 = await service.processInboundMessage(event);
+      expect(res2.isDuplicate).toBe(true);
+      expect(res2.summary).toContain('persistent replay guard');
+
+      // Zero extra database update or audit log
+      expect(mockPrisma.customer.update).toHaveBeenCalledTimes(1);
+    });
+
+    it('ensures concurrent duplicate STOP events produce exactly one consent transition and one audit log', async () => {
+      const storedReplays = new Set<string>();
+      mockPrisma.webhookReplay = {
+        create: vi.fn().mockImplementation(async ({ data }) => {
+          if (storedReplays.has(data.replayKey)) {
+            const err: any = new Error('Unique constraint failed');
+            err.code = 'P2002';
+            throw err;
+          }
+          storedReplays.add(data.replayKey);
+          return { id: 'rep_1', ...data };
+        }),
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+      };
+
+      mockPrisma.customer.findMany.mockResolvedValue([
+        {
+          id: 'cust_concurrent_stop',
+          name: 'Concurrent Corp',
+          phone: '+91 96189 54429',
+          tenantId: 'tenant_1',
+          whatsappConsent: 'UNKNOWN',
+        },
+      ]);
+      mockPrisma.customer.findUnique = vi.fn().mockResolvedValue({
+        id: 'cust_concurrent_stop',
+        name: 'Concurrent Corp',
+        phone: '+91 96189 54429',
+        tenantId: 'tenant_1',
+        whatsappConsent: 'UNKNOWN',
+      });
+      mockPrisma.$transaction = vi.fn().mockImplementation(async (cb) => cb(mockPrisma));
+
+      const event1: InboundMessageEvent = {
+        messageId: 'wamid.concurrent_stop_01',
+        senderPhone: '919618954429',
+        type: 'text',
+        text: 'STOP',
+        timestamp: new Date(),
+      };
+      const event2: InboundMessageEvent = { ...event1 };
+
+      const [r1, r2] = await Promise.all([
+        service.processInboundMessage(event1),
+        service.processInboundMessage(event2),
+      ]);
+
+      const duplicates = [r1, r2].filter((r) => r.isDuplicate);
+      const successes = [r1, r2].filter((r) => !r.isDuplicate);
+
+      expect(successes).toHaveLength(1);
+      expect(duplicates).toHaveLength(1);
+      expect(mockPrisma.customer.update).toHaveBeenCalledTimes(1);
+      expect(mockAuditLogs.log).toHaveBeenCalledTimes(1);
+    });
+
+    it('rolls back persistent replay claim on unexpected transaction failure so retries succeed', async () => {
+      const storedReplays = new Set<string>();
+      mockPrisma.webhookReplay = {
+        create: vi.fn().mockImplementation(async ({ data }) => {
+          storedReplays.add(data.replayKey);
+          return { id: 'rep_1', ...data };
+        }),
+        deleteMany: vi.fn().mockImplementation(async ({ where }) => {
+          if (where?.expiresAt?.lte) {
+            // Active unexpired keys are NOT deleted
+            return { count: 0 };
+          }
+          if (where?.replayKey) storedReplays.delete(where.replayKey);
+          return { count: 1 };
+        }),
+      };
+
+      mockPrisma.customer.findMany.mockRejectedValueOnce(new Error('Database connection lost'));
+
+      const event: InboundMessageEvent = {
+        messageId: 'wamid.retry_after_fail',
+        senderPhone: '919618954429',
+        type: 'text',
+        text: 'STOP',
+        timestamp: new Date(),
+      };
+
+      await expect(service.processInboundMessage(event)).rejects.toThrow('Database connection lost');
+
+      // Verified: Replay key was pruned so legitimate retry is not blocked
+      expect(storedReplays.has('wa_in_wamid.retry_after_fail')).toBe(false);
+
+      // Now recovery retry succeeds cleanly
+      mockPrisma.customer.findMany.mockResolvedValue([
+        {
+          id: 'cust_recovered',
+          name: 'Recovered Corp',
+          phone: '+91 96189 54429',
+          tenantId: 'tenant_1',
+          whatsappConsent: 'UNKNOWN',
+        },
+      ]);
+      mockPrisma.customer.findUnique = vi.fn().mockResolvedValue({
+        id: 'cust_recovered',
+        name: 'Recovered Corp',
+        phone: '+91 96189 54429',
+        tenantId: 'tenant_1',
+        whatsappConsent: 'UNKNOWN',
+      });
+      mockPrisma.$transaction = vi.fn().mockImplementation(async (cb) => cb(mockPrisma));
+
+      const recoveryRes = await service.processInboundMessage(event);
+      expect(recoveryRes.isDuplicate).toBe(false);
+      expect(storedReplays.has('wa_in_wamid.retry_after_fail')).toBe(true);
+      expect(mockPrisma.customer.update).toHaveBeenCalledTimes(1);
     });
   });
 });

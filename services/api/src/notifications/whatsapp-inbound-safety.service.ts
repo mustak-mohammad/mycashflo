@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConsentState } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
+import {
+  claimWebhookReplayKey,
+  DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+} from '../common/webhook-replay.util.js';
 import type { InboundMessageEvent } from '../integrations/interfaces/messaging-provider.interface.js';
 
 export type InboundResolutionStatus =
@@ -254,6 +259,37 @@ export class WhatsAppInboundSafetyService {
       };
     }
 
+    // ── 1b. Persistent Multi-Instance Database Replay Claim ──────────────────
+    const replayKey = `wa_in_${messageId}`;
+    let isPersistentClaimed = true;
+    if (this.prisma?.webhookReplay && typeof this.prisma.webhookReplay.create === 'function') {
+      try {
+        isPersistentClaimed = await claimWebhookReplayKey(
+          this.prisma,
+          'WHATSAPP_CLOUD_INBOUND',
+          replayKey,
+          DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+        );
+      } catch (err: any) {
+        this.logger.error(`[INBOUND SAFETY] Failed to claim persistent replay key: ${err?.message}`);
+        throw err;
+      }
+    }
+
+    if (!isPersistentClaimed) {
+      this.logger.warn(`[INBOUND SAFETY] Duplicate inbound WhatsApp message replay suppressed by persistent database guard: ${messageId}`);
+      return {
+        messageId,
+        senderPhone: event.senderPhone,
+        resolution: 'UNKNOWN_SENDER',
+        classification: 'STANDARD_MESSAGE',
+        optOutEnforced: false,
+        paymentClaimDetected: false,
+        isDuplicate: true,
+        summary: `Duplicate inbound WhatsApp message replay suppressed by persistent replay guard: ${messageId}`,
+      };
+    }
+
     this.inFlightLocks.add(messageId);
 
     try {
@@ -279,19 +315,67 @@ export class WhatsAppInboundSafetyService {
       // ── 4. Opt-Out Enforcement Guard ────────────────────────────────────────
       if (classification === 'OPT_OUT') {
         if (senderResolution.resolution === 'RESOLVED' && senderResolution.customer) {
-          const cust = senderResolution.customer;
-          const currentNotes = cust.notes || '';
+          const cust = senderResolution.customer as any;
+          let shouldAudit = false;
 
-          if (!currentNotes.includes('DND:NO_CONTACT')) {
-            const timestamp = new Date().toISOString();
-            const dndTag = `[DND:NO_CONTACT - WhatsApp Opt-Out on ${timestamp}]`;
-            const updatedNotes = currentNotes ? `${dndTag}\n${currentNotes}` : dndTag;
+          // Transactionally check and update customer consent
+          if (this.prisma.$transaction) {
+            await this.prisma.$transaction(async (tx) => {
+              const current = await tx.customer.findUnique({
+                where: { id: cust.id },
+                select: { id: true, whatsappConsent: true, notes: true, tenantId: true, name: true },
+              });
+              if (!current) return;
 
-            await this.prisma.customer.update({
-              where: { id: cust.id },
-              data: { notes: updatedNotes },
+              const isAlreadyOptedOut =
+                current.whatsappConsent === ConsentState.OPTED_OUT ||
+                (current.notes || '').includes('WhatsApp Opt-Out') ||
+                (current.notes || '').includes('DND:NO_CONTACT');
+
+              if (!isAlreadyOptedOut) {
+                const timestamp = new Date().toISOString();
+                const dndTag = `[DND:NO_CONTACT - WhatsApp Opt-Out on ${timestamp}]`;
+                const updatedNotes = current.notes ? `${dndTag}\n${current.notes}` : dndTag;
+
+                await tx.customer.update({
+                  where: { id: current.id },
+                  data: {
+                    whatsappConsent: ConsentState.OPTED_OUT,
+                    whatsappConsentAt: new Date(),
+                    whatsappConsentSource: 'INBOUND_WHATSAPP_STOP',
+                    notes: updatedNotes,
+                  },
+                });
+                shouldAudit = true;
+              }
             });
+          } else {
+            // Mock prisma fallback if $transaction is not mocked
+            const currentNotes = cust.notes || '';
+            const isAlreadyOptedOut =
+              cust.whatsappConsent === ConsentState.OPTED_OUT ||
+              currentNotes.includes('WhatsApp Opt-Out') ||
+              currentNotes.includes('DND:NO_CONTACT');
 
+            if (!isAlreadyOptedOut) {
+              const timestamp = new Date().toISOString();
+              const dndTag = `[DND:NO_CONTACT - WhatsApp Opt-Out on ${timestamp}]`;
+              const updatedNotes = currentNotes ? `${dndTag}\n${currentNotes}` : dndTag;
+
+              await this.prisma.customer.update({
+                where: { id: cust.id },
+                data: {
+                  whatsappConsent: ConsentState.OPTED_OUT,
+                  whatsappConsentAt: new Date(),
+                  whatsappConsentSource: 'INBOUND_WHATSAPP_STOP',
+                  notes: updatedNotes,
+                },
+              });
+              shouldAudit = true;
+            }
+          }
+
+          if (shouldAudit) {
             await this.auditLogs.log({
               tenantId: cust.tenantId,
               userId: 'SYSTEM',
@@ -303,6 +387,7 @@ export class WhatsAppInboundSafetyService {
                 messageId,
                 senderPhone: event.senderPhone,
                 trigger: 'INBOUND_OPT_OUT',
+                consentState: ConsentState.OPTED_OUT,
               },
             });
           }
@@ -377,6 +462,15 @@ export class WhatsAppInboundSafetyService {
       }
 
       return result;
+    } catch (err: any) {
+      if (this.prisma?.webhookReplay?.deleteMany) {
+        try {
+          await this.prisma.webhookReplay.deleteMany({ where: { replayKey } });
+        } catch {
+          // ignore rollback prune failure
+        }
+      }
+      throw err;
     } finally {
       this.inFlightLocks.delete(messageId);
     }

@@ -513,20 +513,33 @@ class TestChotuAgent(unittest.TestCase):
         self.assertIn("#INV-102 for ₹50,000", res["reply"])
 
     def test_livekit_worker_pre_call_consent_enforcement(self):
-        """Worker strictly suppresses call if customer has NO_CONTACT preference or DND note."""
+        """Worker strictly suppresses call if customer has NO_CONTACT preference, DND note, or lacks consent."""
         from agent import LiveKitChotuWorker
         worker = LiveKitChotuWorker(agent=self.agent)
 
-        # 1. Active DND note suppresses call
-        self.assertFalse(worker.check_pre_call_consent(customer_notes="[DND:NO_CONTACT - Requested on 2026-10-15]"))
-        self.assertFalse(worker.check_pre_call_consent(customer_notes="Customer said NO_CONTACT please"))
-        self.assertFalse(worker.check_pre_call_consent(customer_notes="OPT_OUT confirmed"))
+        # 1. Un-consented customer (UNKNOWN or missing) without server authorization is suppressed
+        self.assertFalse(worker.check_pre_call_consent(customer_notes="Call after 2 PM", preferred_channel="CALL"))
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="UNKNOWN", server_authorized=False))
+        self.assertFalse(worker.check_pre_call_consent(voice_consent=None, server_authorized=False))
 
-        # 2. Preferred channel NO_CONTACT suppresses call
-        self.assertFalse(worker.check_pre_call_consent(preferred_channel="NO_CONTACT"))
+        # 2. Explicit OPTED_OUT voice consent suppresses call regardless of server authorization
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="OPTED_OUT", server_authorized=False))
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="OPTED_OUT", server_authorized=True))
 
-        # 3. Normal customer passes consent check
-        self.assertTrue(worker.check_pre_call_consent(customer_notes="Call after 2 PM", preferred_channel="CALL"))
+        # 3. Active DND note suppresses call even if voice_consent is OPTED_IN or server authorized
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="OPTED_IN", customer_notes="[DND:NO_CONTACT - Requested on 2026-10-15]"))
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="OPTED_IN", customer_notes="Customer said NO_CONTACT please"))
+        self.assertFalse(worker.check_pre_call_consent(server_authorized=True, customer_notes="OPT_OUT confirmed"))
+
+        # 4. Preferred channel NO_CONTACT suppresses call
+        self.assertFalse(worker.check_pre_call_consent(voice_consent="OPTED_IN", preferred_channel="NO_CONTACT"))
+        self.assertFalse(worker.check_pre_call_consent(server_authorized=True, preferred_channel="NO_CONTACT"))
+
+        # 5. Customer with explicit OPTED_IN consent and clean notes passes check
+        self.assertTrue(worker.check_pre_call_consent(voice_consent="OPTED_IN", customer_notes="Call after 2 PM", preferred_channel="CALL"))
+
+        # 6. Pre-authorized server session with clean notes passes check
+        self.assertTrue(worker.check_pre_call_consent(server_authorized=True, customer_notes="Call after 2 PM", preferred_channel="CALL"))
 
     def test_livekit_worker_token_generation(self):
         """Worker generates valid room token with minimum permissions and expiry."""
@@ -547,6 +560,103 @@ class TestChotuAgent(unittest.TestCase):
         res = worker.process_incoming_transcript("We cannot pay because our cash flow is completely blocked", "ASK_FULL_PAYMENT", ctx)
         self.assertEqual(res["next_stage"], "NEGOTIATE_AMOUNT")
         self.assertFalse(res["should_end"])
+
+    def test_livekit_worker_audio_frame_generation(self):
+        """Worker generates 48kHz mono AudioFrames matching speech duration."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        frames = worker.generate_audio_frames("Namaste! This is Chotu calling regarding your invoice.")
+        self.assertTrue(len(frames) > 0)
+        self.assertEqual(frames[0].sample_rate, 48000)
+        self.assertEqual(frames[0].num_channels, 1)
+        self.assertEqual(frames[0].samples_per_channel, 960)
+
+    def test_livekit_worker_scenario_cannot_pay(self):
+        """1. Cannot pay / Financial Hardship scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("We cannot pay anything right now, facing severe loss in business", "ASK_FULL_PAYMENT", ctx)
+        self.assertEqual(res["outcome"], "UNABLE_TO_PAY")
+        self.assertIn("cash flow challenges", res["reply"].lower())
+
+    def test_livekit_worker_scenario_already_paid(self):
+        """2. Already paid / Payment claimed with UTR scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("We already paid yesterday via NEFT UTR987654321", "CONFIRM_BALANCE", ctx)
+        self.assertEqual(res["outcome"], "PAYMENT_CLAIMED")
+        self.assertTrue(res["should_end"])
+        self.assertIn("987654321", res["reply"])
+
+    def test_livekit_worker_scenario_invoice_dispute(self):
+        """3. Invoice dispute scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("There is an invoice dispute, wrong items were billed", "CONFIRM_BALANCE", ctx)
+        self.assertEqual(res["outcome"], "DISPUTE")
+        self.assertTrue(res["should_end"])
+        self.assertIn("billing desk", res["reply"])
+
+    def test_livekit_worker_scenario_callback_request(self):
+        """4. Callback request scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("I am driving right now, please call me back after 5 PM", "GREETING_AND_VERIFICATION", ctx)
+        self.assertEqual(res["outcome"], "CALLBACK_REQUESTED")
+        self.assertTrue(res["should_end"])
+
+    def test_livekit_worker_scenario_human_handoff(self):
+        """5. Human escalation / handoff scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("Transfer me to a senior manager or human agent immediately", "GREETING_AND_VERIFICATION", ctx)
+        self.assertEqual(res["outcome"], "TRANSFERRED_TO_AGENT")
+        self.assertTrue(res["should_end"])
+        self.assertIn("transferring", res["reply"].lower())
+
+    def test_livekit_worker_scenario_explicit_promise_to_pay(self):
+        """6. Explicit Promise to Pay (PTP) confirmation and cancellation checks."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {
+            "customer_name": "Mehta Textiles",
+            "outstanding": "₹80,000",
+            "awaiting_confirmation": True,
+            "pending_action": "PROMISE_TO_PAY",
+            "extracted": {"agreed_amount": "₹80,000", "promised_date": "next Monday"},
+        }
+        # Confirmed
+        res = worker.process_incoming_transcript("Yes, I confirm that we will pay ₹80,000 on Monday", "SUMMARIZE_COMMITMENT", ctx)
+        self.assertEqual(res["outcome"], "PROMISE_TO_PAY")
+        self.assertTrue(res["should_end"])
+        self.assertTrue(res.get("action_executed"))
+
+        # Rejection / Cancellation
+        ctx_cancel = {
+            "customer_name": "Mehta Textiles",
+            "outstanding": "₹80,000",
+            "awaiting_confirmation": True,
+            "pending_action": "PROMISE_TO_PAY",
+            "extracted": {},
+        }
+        res_cancel = worker.process_incoming_transcript("No, wait, let me consult my partners first", "SUMMARIZE_COMMITMENT", ctx_cancel)
+        self.assertNotEqual(res_cancel["outcome"], "PROMISE_TO_PAY")
+        self.assertFalse(res_cancel["should_end"])
+
+    def test_livekit_worker_scenario_no_contact(self):
+        """7. NO_CONTACT / Cease-Contact opt-out scenario."""
+        from agent import LiveKitChotuWorker
+        worker = LiveKitChotuWorker(agent=self.agent)
+        ctx = {"customer_name": "Mehta Textiles", "outstanding": "₹80,000"}
+        res = worker.process_incoming_transcript("Stop calling this number, take me off your call list", "GREETING_AND_VERIFICATION", ctx)
+        self.assertEqual(res["outcome"], "NO_CONTACT")
+        self.assertTrue(res["should_end"])
+        self.assertIn("stop", res["reply"].lower())
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Param,
   Body,
   Query,
@@ -12,7 +13,10 @@ import {
   HttpStatus,
   NotFoundException,
   BadRequestException,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
@@ -24,6 +28,7 @@ import {
   CallQueryDto,
   CreateCallDto,
   InitiateOutboundCallDto,
+  UpdateCallOutcomeDto,
 } from './calls.service.js';
 import type { Response } from 'express';
 
@@ -67,17 +72,22 @@ export class CallsController {
   @Post(':id/recording/upload')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(FileInterceptor('file'))
   @ApiOperation({ summary: 'Upload an audio recording blob for a call session' })
   async uploadRecording(
     @CurrentUser() user: AuthUser,
     @Param('id') id: string,
+    @UploadedFile() file: any,
     @Body() body: { audioBase64?: string; mimeType?: string },
     @Req() req: any,
   ) {
     let buffer: Buffer | null = null;
-    let mimeType = body?.mimeType || 'audio/webm';
+    let mimeType = file?.mimetype || body?.mimeType || 'audio/webm';
 
-    if (body?.audioBase64) {
+    if (file && file.buffer && file.buffer.length > 0) {
+      buffer = file.buffer;
+      mimeType = file.mimetype || mimeType;
+    } else if (body?.audioBase64) {
       buffer = Buffer.from(body.audioBase64, 'base64');
     } else if (Buffer.isBuffer(req.body) && req.body.length > 0) {
       buffer = req.body;
@@ -94,7 +104,11 @@ export class CallsController {
     }
 
     if (!buffer || buffer.length === 0) {
-      throw new BadRequestException('No audio data provided in request');
+      throw new BadRequestException('Empty or zero-byte recording rejected');
+    }
+
+    if (buffer.length < 32) {
+      throw new BadRequestException('Invalid audio file: audio recording buffer is too small or truncated');
     }
 
     return this.callsService.saveRecording(id, user, buffer, mimeType);
@@ -216,6 +230,18 @@ export class CallsController {
     return this.callsService.create(user, dto);
   }
 
+  @Patch(':id/outcome')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Update outcome and notes for a call session' })
+  updateOutcome(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateCallOutcomeDto,
+  ) {
+    return this.callsService.updateOutcome(id, user, dto);
+  }
+
   @Post('outbound/initiate')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
@@ -229,12 +255,36 @@ export class CallsController {
 
   @Post('webhook/:provider')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Telephony carrier status callback webhook' })
+  @ApiOperation({ summary: 'Telephony carrier status callback webhook (signature/token verified)' })
   handleTelephonyWebhook(
     @Param('provider') provider: string,
     @Body() payload: any,
+    @Req() req: any,
+    @Query() query: Record<string, string | string[] | undefined>,
   ) {
-    return this.callsService.handleTelephonyWebhook(provider, payload);
+    const headers = (req?.headers || {}) as Record<string, string | string[] | undefined>;
+    const forwardedProto = headers['x-forwarded-proto'];
+    const protoHeader = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const protocol = protoHeader?.split(',')[0]?.trim() || req?.protocol || 'https';
+
+    const forwardedHost = headers['x-forwarded-host'];
+    const hostHeader = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost;
+    const host =
+      hostHeader?.split(',')[0]?.trim() ||
+      (typeof req?.get === 'function' ? req.get('host') : undefined) ||
+      (Array.isArray(headers.host) ? headers.host[0] : headers.host);
+
+    const configuredBase = this.callsService.getWebhookBaseUrl();
+    const baseUrl = configuredBase || (host ? `${protocol}://${host}` : '');
+    const originalUrl = req?.originalUrl || req?.url || '';
+    const requestUrl = baseUrl ? `${baseUrl.replace(/\/$/, '')}${originalUrl}` : undefined;
+
+    return this.callsService.handleTelephonyWebhook(provider, payload, {
+      headers,
+      query,
+      rawBody: req?.rawBody,
+      requestUrl,
+    });
   }
 }
 

@@ -43,21 +43,15 @@ export const callsApi = {
       .then((r) => r.data),
 
   uploadRecording: async (id: string, audioBlob: Blob) => {
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onloadend = () => {
-        const result = reader.result as string
-        const base64Data = result.includes(',') ? result.split(',')[1] : result
-        resolve(base64Data)
-      }
-      reader.onerror = reject
-      reader.readAsDataURL(audioBlob)
-    })
+    const formData = new FormData()
+    const mimeType = audioBlob.type || 'audio/webm'
+    const ext = mimeType.includes('wav') ? 'wav' : mimeType.includes('ogg') ? 'ogg' : 'webm'
+    formData.append('file', audioBlob, `call-${id}.${ext}`)
+    formData.append('mimeType', mimeType)
 
     return client
-      .post(`/calls/${id}/recording/upload`, {
-        audioBase64: base64,
-        mimeType: audioBlob.type || 'audio/webm',
+      .post(`/calls/${id}/recording/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
       })
       .then((r) => r.data)
   },
@@ -122,9 +116,14 @@ export const callsApi = {
     outcome?: string
     transcript?: string
     summary?: string
+    stage?: string
+    metadata?: Record<string, any>
     livekitRoom?: string
     recordingEgressId?: string
   }) => client.post<CallSession>('/calls', data).then((r) => r.data),
+
+  updateOutcome: (id: string, outcome: string, notes?: string) =>
+    client.patch<CallSession>(`/calls/${id}/outcome`, { outcome, notes }).then((r) => r.data),
 
   initiateOutbound: (data: {
     customerId: string

@@ -3,7 +3,7 @@ import type { IntegrationItem } from '../types'
 
 export interface TestIntegrationResponse {
   provider: string
-  status: 'SUCCESS' | 'ERROR'
+  status: 'SUCCESS' | 'FAILED' | 'ERROR'
   isSimulated: boolean
   message: string
   sampleUrl?: string

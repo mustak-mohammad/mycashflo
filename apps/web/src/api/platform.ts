@@ -88,7 +88,12 @@ export interface PlatformSettings {
   }
   providers: {
     database: { status: string; engine: string }
-    razorpay: { configured: boolean }
+    razorpay: {
+      configured: boolean
+      mode?: string
+      webhookConfigured?: boolean
+      webhookStatus?: string
+    }
     stripe: { configured: boolean }
     resend: { configured: boolean }
     whatsapp: { configured: boolean }

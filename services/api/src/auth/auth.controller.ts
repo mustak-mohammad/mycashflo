@@ -6,6 +6,7 @@ import { GoogleAuthDto } from './dto/google-auth.dto.js';
 import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 import { LogoutDto } from './dto/logout.dto.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 import { JwtAuthGuard } from './jwt-auth.guard.js';
 import { CurrentUser } from './current-user.decorator.js';
 import type { AuthUser } from './current-user.decorator.js';
@@ -60,6 +61,18 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Validation error: display name cannot be empty' })
   updateProfileMe(@CurrentUser() user: AuthUser, @Body() dto: UpdateProfileDto) {
     return this.authService.updateProfile(user.userId, user.tenantId, dto);
+  }
+
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Secure self-service password change for authenticated users' })
+  @ApiResponse({ status: 200, description: 'Password changed successfully' })
+  @ApiResponse({ status: 400, description: 'Current password invalid or validation error' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  changePassword(@CurrentUser() user: AuthUser, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(user.userId, user.tenantId, dto);
   }
 
   @Post('logout')

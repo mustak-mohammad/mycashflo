@@ -1,3 +1,5 @@
+import { parseIntegrationEncryptionKey } from './secret-encryption.util.js';
+
 /**
  * Startup Environment Variable Validation
  *
@@ -175,6 +177,94 @@ export function validateEnvironment(config: Record<string, unknown>): ValidatedE
     if (!callerId.startsWith('+') || callerId.length < 8) {
       errors.push('SIP_OUTBOUND_CALLER_ID must be a valid E.164 phone number starting with +');
     }
+  }
+
+  // 16. ALLOW_DEV_MOCK_AUTH (optional, boolean string 'true' or 'false'; ignored/forbidden in production)
+  if (
+    config.ALLOW_DEV_MOCK_AUTH !== undefined &&
+    config.ALLOW_DEV_MOCK_AUTH !== null &&
+    config.ALLOW_DEV_MOCK_AUTH !== ''
+  ) {
+    const flag = String(config.ALLOW_DEV_MOCK_AUTH).trim().toLowerCase();
+    if (flag !== 'true' && flag !== 'false') {
+      errors.push('ALLOW_DEV_MOCK_AUTH must be "true" or "false"');
+    }
+  }
+
+  // 17. ALLOW_DEV_LIVEKIT_SIMULATION (optional, boolean string 'true' or 'false'; ignored/forbidden in production)
+  if (
+    config.ALLOW_DEV_LIVEKIT_SIMULATION !== undefined &&
+    config.ALLOW_DEV_LIVEKIT_SIMULATION !== null &&
+    config.ALLOW_DEV_LIVEKIT_SIMULATION !== ''
+  ) {
+    const flag = String(config.ALLOW_DEV_LIVEKIT_SIMULATION).trim().toLowerCase();
+    if (flag !== 'true' && flag !== 'false') {
+      errors.push('ALLOW_DEV_LIVEKIT_SIMULATION must be "true" or "false"');
+    }
+  }
+
+  // 18. PAYMENT_SIMULATION_MODE & Razorpay Test Mode Configuration Safety
+  const nodeEnv = String(config.NODE_ENV || '').trim().toLowerCase();
+  const isProd = nodeEnv === 'production';
+  const isPlaceholderVal = (val: unknown) => {
+    if (typeof val !== 'string') return true;
+    const t = val.trim().toLowerCase();
+    return (
+      !t ||
+      t.includes('placeholder') ||
+      t.startsWith('your_') ||
+      t.includes('mock') ||
+      t.includes('test_dummy') ||
+      t === 'changeme'
+    );
+  };
+
+  if (
+    config.PAYMENT_SIMULATION_MODE !== undefined &&
+    config.PAYMENT_SIMULATION_MODE !== null &&
+    config.PAYMENT_SIMULATION_MODE !== ''
+  ) {
+    const flag = String(config.PAYMENT_SIMULATION_MODE).trim().toLowerCase();
+    if (flag !== 'true' && flag !== 'false') {
+      errors.push('PAYMENT_SIMULATION_MODE must be "true" or "false"');
+    } else if (isProd && flag === 'true') {
+      errors.push('PAYMENT_SIMULATION_MODE cannot be "true" in production');
+    }
+  }
+
+  if (
+    config.RAZORPAY_KEY_ID !== undefined &&
+    config.RAZORPAY_KEY_ID !== null &&
+    String(config.RAZORPAY_KEY_ID).trim() !== '' &&
+    !isPlaceholderVal(config.RAZORPAY_KEY_ID)
+  ) {
+    const rzpKeyId = String(config.RAZORPAY_KEY_ID).trim();
+    if (!rzpKeyId.startsWith('rzp_test_') && !rzpKeyId.startsWith('rzp_live_')) {
+      errors.push('RAZORPAY_KEY_ID must start with rzp_test_ or rzp_live_');
+    } else if (!isProd && rzpKeyId.startsWith('rzp_live_')) {
+      errors.push('RAZORPAY_KEY_ID cannot use Live Mode credentials (rzp_live_*) outside production');
+    }
+
+    if (isPlaceholderVal(config.RAZORPAY_KEY_SECRET)) {
+      errors.push('RAZORPAY_KEY_SECRET is required when RAZORPAY_KEY_ID is configured');
+    }
+    if (isProd && isPlaceholderVal(config.RAZORPAY_WEBHOOK_SECRET)) {
+      errors.push('RAZORPAY_WEBHOOK_SECRET is required in production when Razorpay is configured');
+    }
+  }
+
+  // 19. INTEGRATION_ENCRYPTION_KEY (required in production; validated for 32-byte key length whenever provided)
+  const rawEncKey = config.INTEGRATION_ENCRYPTION_KEY;
+  if (rawEncKey !== undefined && rawEncKey !== null && String(rawEncKey).trim() !== '') {
+    try {
+      parseIntegrationEncryptionKey(String(rawEncKey));
+    } catch {
+      errors.push(
+        'INTEGRATION_ENCRYPTION_KEY must be a valid 32-byte (256-bit) hex or base64 key',
+      );
+    }
+  } else if (isProd) {
+    errors.push('INTEGRATION_ENCRYPTION_KEY is required in production to protect stored credentials');
   }
 
   if (errors.length > 0) {

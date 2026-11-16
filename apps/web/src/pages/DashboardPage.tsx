@@ -48,6 +48,7 @@ const DEFAULT_PREFERENCES: DashboardPreferences = {
 
 export default function DashboardPage() {
   const { user } = useAuth()
+  const canManageOnboarding = user?.role === 'ADMIN' || user?.role === 'MANAGER'
   const [preferences, setPreferences] = useState<DashboardPreferences>(DEFAULT_PREFERENCES)
   const [isCustomizeOpen, setIsCustomizeOpen] = useState(false)
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false)
@@ -86,11 +87,13 @@ export default function DashboardPage() {
       })
       .catch((err) => console.warn('Could not load dashboard preferences:', err))
 
-    onboardingApi
-      .getStatus()
-      .then((st) => setOnboardingStatus(st))
-      .catch((err) => console.warn('Could not load onboarding status:', err))
-  }, [])
+    if (canManageOnboarding) {
+      onboardingApi
+        .getStatus()
+        .then((st) => setOnboardingStatus(st))
+        .catch((err) => console.warn('Could not load onboarding status:', err))
+    }
+  }, [canManageOnboarding])
 
   // Save updated preferences to backend
   async function handleSavePreferences(newPrefs: DashboardPreferences) {
@@ -157,21 +160,23 @@ export default function DashboardPage() {
               <span>Customize View</span>
             </button>
 
-            {/* Onboarding Wizard Launcher */}
-            <button
-              type="button"
-              onClick={() => setIsOnboardingOpen(true)}
-              className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
-            >
-              <span>🚀</span>
-              <span>Setup Wizard</span>
-            </button>
+            {/* Onboarding Wizard Launcher (Admin / Manager only) */}
+            {canManageOnboarding && (
+              <button
+                type="button"
+                onClick={() => setIsOnboardingOpen(true)}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <span>🚀</span>
+                <span>Setup Wizard</span>
+              </button>
+            )}
           </div>
         }
       />
 
-      {/* Onboarding Progress Guide Banner (shows if setup is incomplete) */}
-      {onboardingStatus && (!onboardingStatus.isComplete || (onboardingStatus.completionPercentage ?? onboardingStatus.progressPercentage ?? 0) < 100) && (
+      {/* Onboarding Progress Guide Banner (shows if setup is incomplete, Admin/Manager only) */}
+      {canManageOnboarding && onboardingStatus && (!onboardingStatus.isComplete || (onboardingStatus.completionPercentage ?? onboardingStatus.progressPercentage ?? 0) < 100) && (
         <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-900/30 via-purple-900/20 to-black/40 border border-indigo-500/30 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
@@ -728,20 +733,22 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* ── Onboarding Wizard Modal ────────────────────────────────────────── */}
-      <OnboardingWizardModal
-        isOpen={isOnboardingOpen}
-        onClose={() => {
-          setIsOnboardingOpen(false)
-          setRefreshKey((k) => k + 1)
-          onboardingApi.getStatus().then((st) => setOnboardingStatus(st)).catch(console.warn)
-        }}
-        onComplete={() => {
-          setIsOnboardingOpen(false)
-          setRefreshKey((k) => k + 1)
-          onboardingApi.getStatus().then((st) => setOnboardingStatus(st)).catch(console.warn)
-        }}
-      />
+      {/* ── Onboarding Wizard Modal (Admin / Manager only) ────────────────── */}
+      {canManageOnboarding && (
+        <OnboardingWizardModal
+          isOpen={isOnboardingOpen}
+          onClose={() => {
+            setIsOnboardingOpen(false)
+            setRefreshKey((k) => k + 1)
+            onboardingApi.getStatus().then((st) => setOnboardingStatus(st)).catch(console.warn)
+          }}
+          onComplete={() => {
+            setIsOnboardingOpen(false)
+            setRefreshKey((k) => k + 1)
+            onboardingApi.getStatus().then((st) => setOnboardingStatus(st)).catch(console.warn)
+          }}
+        />
+      )}
     </div>
   )
 }

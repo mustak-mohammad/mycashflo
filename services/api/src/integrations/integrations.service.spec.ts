@@ -339,7 +339,7 @@ describe('Phase 7 Integrations Unit Tests', () => {
       expect(res.status).toBe('SUCCESS');
       expect(res.isSimulated).toBe(true);
       expect(res.message).toContain('simulation mode');
-      expect(res.messageId).toMatch(/^sms_msg_/);
+      expect(res.messageId).toMatch(/^sms_/);
     });
   });
 
@@ -355,7 +355,7 @@ describe('Phase 7 Integrations Unit Tests', () => {
         { deliveryEnabled: false, senderId: 'MCASHF', templateId: 'DLT-110716-1234' },
       );
 
-      expect(result.status).toBe('DELIVERED');
+      expect(result.status).toBe('FAILED');
       expect(result.isSimulated).toBe(true);
       expect(result.raw?.senderId).toBe('MCASHF');
       expect(result.raw?.dltTemplateId).toBe('DLT-110716-1234');

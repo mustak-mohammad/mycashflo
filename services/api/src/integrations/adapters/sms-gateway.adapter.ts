@@ -22,6 +22,20 @@ export interface SmsGatewayConfig {
 export class SmsGatewayAdapter implements MessagingAdapter {
   private readonly logger = new Logger(SmsGatewayAdapter.name);
 
+  private maskPhone(phone: string): string {
+    const clean = phone.replace(/[^\d+]/g, '');
+    if (clean.length <= 4) return '****';
+    return `${clean.slice(0, 3)}****${clean.slice(-4)}`;
+  }
+
+  private sanitizeSecretString(str: any): string {
+    if (typeof str !== 'string') return String(str || '');
+    return str
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]')
+      .replace(/((?:authToken|accountSid|secret)=)[^\s&,;'"]+/gi, '$1[REDACTED]');
+  }
+
   /**
    * Dispatch transactional SMS reminder or safe simulation.
    * Complies with Indian DLT (Distributed Ledger Technology) requirements
@@ -40,19 +54,21 @@ export class SmsGatewayAdapter implements MessagingAdapter {
     const cleanPhone = input.to.replace(/[^\d+]/g, '');
     const messageId = `sms_msg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-    // ── Safe Simulation Mode ──────────────────────────────────────────────────
+    // ── Delivery Disabled Policy ──────────────────────────────────────────────
     if (!deliveryEnabled) {
       this.logger.log(
-        `[SIMULATION] SMS delivery suppressed by safety policy. Simulated message: ${messageId} to ${cleanPhone}`,
+        `[SIMULATION] SMS delivery suppressed by safety policy. Target: ${this.maskPhone(cleanPhone)}`,
       );
       return {
-        messageId,
-        provider: config?.provider || 'SMS_SIMULATED',
-        status: 'DELIVERED',
+        messageId: `sms_disabled_${Date.now()}`,
+        provider: config?.provider || 'SMS_GATEWAY',
+        status: 'FAILED',
         isSimulated: true,
+        error: 'SMS delivery is disabled by safety policy (SMS_DELIVERY_ENABLED is false)',
         raw: {
           simulated: true,
-          recipient: cleanPhone,
+          deliveryDisabled: true,
+          recipient: this.maskPhone(cleanPhone),
           template: input.template,
           senderId: config?.senderId || 'MCASHF',
           dltTemplateId: config?.templateId || 'DLT-110716-DEMO',
@@ -70,16 +86,17 @@ export class SmsGatewayAdapter implements MessagingAdapter {
 
       if (!isAllowed) {
         this.logger.warn(
-          `[SAFETY GUARD] Outbound SMS to ${cleanPhone} blocked. Real customer outreach is suppressed in non-production environments. Configured test recipient: ${allowedPhone || 'none'}`,
+          `[SAFETY GUARD] Outbound SMS to ${this.maskPhone(cleanPhone)} blocked. Real customer outreach is suppressed in non-production environments. Configured test recipient: ${allowedPhone ? this.maskPhone(allowedPhone) : 'none'}`,
         );
         return {
           messageId: `sms_blocked_${Date.now()}`,
           provider: config?.provider || 'SMS_GATEWAY',
           status: 'FAILED',
           isSimulated: true,
+          error: `Safety Guard: Delivery to real customer phone '${this.maskPhone(cleanPhone)}' is blocked in non-production. Target must match SMS_TEST_RECIPIENT.`,
           raw: {
             safetyGuard: true,
-            recipient: cleanPhone,
+            recipient: this.maskPhone(cleanPhone),
             reason: 'Real customer SMS outreach suppressed in non-production',
           },
         };
@@ -89,13 +106,19 @@ export class SmsGatewayAdapter implements MessagingAdapter {
     // ── Live Provider Dispatch Path ──────────────────────────────────────────
     const provider = config?.provider || 'TWILIO';
     if (!config?.accountSid || !config?.authToken) {
-      this.logger.warn('SMS provider credentials missing. Falling back to simulation mode.');
+      this.logger.warn('SMS provider credentials missing. Outbound SMS cannot be dispatched.');
       return {
-        messageId,
+        messageId: `sms_no_creds_${Date.now()}`,
         provider,
-        status: 'DELIVERED',
-        isSimulated: true,
-        raw: { simulated: true, reason: 'Missing credentials' },
+        status: 'FAILED',
+        isSimulated: false,
+        error: 'SMS provider credentials are missing (accountSid and authToken required)',
+        raw: {
+          missingCredentials: true,
+          recipient: this.maskPhone(cleanPhone),
+          template: input.template,
+          timestamp: new Date().toISOString(),
+        },
       };
     }
 
@@ -114,20 +137,33 @@ export class SmsGatewayAdapter implements MessagingAdapter {
         },
       };
     } catch (err: any) {
-      this.logger.warn(`Live SMS dispatch failed: ${err.message}. Operating in safe fallback mode.`);
+      const safeErr = this.sanitizeSecretString(err.message);
+      this.logger.warn(`Live SMS dispatch failed: ${safeErr}`);
       return {
-        messageId,
+        messageId: `sms_failed_${Date.now()}`,
         provider,
         status: 'FAILED',
         isSimulated: false,
-        raw: { error: err.message },
+        error: safeErr,
+        raw: { error: safeErr },
       };
     }
   }
 
   verifyWebhookSignature(payload: any, signature: string, secret?: string): boolean {
-    const webhookSecret = secret || process.env.SMS_WEBHOOK_SECRET || 'sms_webhook_secret_demo';
+    const isProd = process.env.NODE_ENV === 'production';
     if (!signature) return false;
+
+    const isSimSig = signature === 'mock_sms_valid_signature' || signature.startsWith('sim_');
+    if (isProd && isSimSig) {
+      return false;
+    }
+
+    const webhookSecret =
+      secret || process.env.SMS_WEBHOOK_SECRET || (isProd ? '' : 'sms_webhook_secret_demo');
+    if (!webhookSecret) {
+      return false;
+    }
 
     const rawBody = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const expected = crypto.createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
@@ -135,7 +171,7 @@ export class SmsGatewayAdapter implements MessagingAdapter {
     try {
       return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
     } catch {
-      return signature === 'mock_sms_valid_signature' || signature.startsWith('sim_');
+      return !isProd && isSimSig;
     }
   }
 

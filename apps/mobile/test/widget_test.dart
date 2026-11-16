@@ -112,6 +112,52 @@ void main() {
     expect(callSession.isSimulated, true);
     expect(callSession.notes, contains('disabled by policy'));
   });
+
+  test('DocumentDeliveryRequestItem and DeliveryAttemptItem parsing test', () {
+    final docJson = {
+      'id': 'doc_req_001',
+      'customerId': 'cust_001',
+      'invoiceId': 'inv_001',
+      'requestType': 'BOTH',
+      'deliveryChannel': 'WHATSAPP_AND_EMAIL',
+      'status': 'COMPLETED',
+      'requestedBy': 'CHOTU_AI_VOICE',
+      'requestedAt': '2026-11-08T10:00:00Z',
+      'attempts': [
+        {
+          'id': 'att_001',
+          'channel': 'WHATSAPP',
+          'destinationMasked': '+91 ****3210',
+          'status': 'SIMULATED',
+          'provider': 'WHATSAPP_SIMULATOR',
+          'errorMessage': null,
+          'sentAt': '2026-11-08T10:00:01Z',
+          'deliveredAt': '2026-11-08T10:00:02Z',
+        },
+        {
+          'id': 'att_002',
+          'channel': 'EMAIL',
+          'destinationMasked': 'f****e@client.com',
+          'status': 'SIMULATED',
+          'provider': 'RESEND_SIMULATOR',
+          'errorMessage': null,
+          'sentAt': '2026-11-08T10:00:01Z',
+          'deliveredAt': '2026-11-08T10:00:02Z',
+        }
+      ],
+    };
+
+    final docRequest = DocumentDeliveryRequestItem.fromJson(docJson);
+    expect(docRequest.id, 'doc_req_001');
+    expect(docRequest.requestType, 'BOTH');
+    expect(docRequest.deliveryChannel, 'WHATSAPP_AND_EMAIL');
+    expect(docRequest.status, 'COMPLETED');
+    expect(docRequest.attempts.length, 2);
+    expect(docRequest.attempts[0].channel, 'WHATSAPP');
+    expect(docRequest.attempts[0].status, 'SIMULATED');
+    expect(docRequest.attempts[1].channel, 'EMAIL');
+    expect(docRequest.attempts[1].destinationMasked, 'f****e@client.com');
+  });
 }
 
 

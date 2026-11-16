@@ -27,6 +27,7 @@ export interface TriggerRemindersResult {
   evaluatedInvoices: number
   dispatchedCount: number
   failedCount: number
+  suppressedCount?: number
   details: Array<{
     invoiceNumber: string
     customerName: string
@@ -34,6 +35,9 @@ export interface TriggerRemindersResult {
     status?: NotifStatus
     daysOverdue?: number
     error?: string
+    skipped?: boolean
+    suppressed?: boolean
+    reason?: string
   }>
 }
 

@@ -19,36 +19,37 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users            User[]
-  customers        Customer[]
-  invoices         Invoice[]
-  payments         Payment[]
-  collectionCases  CollectionCase[]
-  followUpTasks    FollowUpTask[]
-  callSessions     CallSession[]
-  notifications    Notification[]
-  integrationCfgs  IntegrationConfig[]
-  auditLogs        AuditLog[]
-  actionProposals  ActionProposal[]
-  voicePrompts     VoicePrompt[]
+  users                    User[]
+  customers                Customer[]
+  invoices                 Invoice[]
+  payments                 Payment[]
+  collectionCases          CollectionCase[]
+  followUpTasks            FollowUpTask[]
+  callSessions             CallSession[]
+  notifications            Notification[]
+  integrationCfgs          IntegrationConfig[]
+  auditLogs                AuditLog[]
+  actionProposals          ActionProposal[]
+  voicePrompts             VoicePrompt[]
   documentDeliveryRequests DocumentDeliveryRequest[]
   deliveryAttempts         DeliveryAttempt[]
   paymentRefunds           PaymentRefund[]
   paymentOrderIntents      PaymentOrderIntent[]
+  notificationOutbox       NotificationOutbox[]
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 model User {
-  id           String   @id @default(cuid())
-  email        String
-  passwordHash String
-  name         String
-  role         UserRole @default(AGENT)
-  isActive          Boolean   @default(true)
-  tenantId          String
-  tokensValidAfter  DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt    DateTime @updatedAt
+  id               String    @id @default(cuid())
+  email            String
+  passwordHash     String
+  name             String
+  role             UserRole  @default(AGENT)
+  isActive         Boolean   @default(true)
+  tenantId         String
+  tokensValidAfter DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   collectionCases CollectionCase[]
@@ -97,18 +98,42 @@ model Customer {
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 
-  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  invoices        Invoice[]
-  payments        Payment[]
-  collectionCases CollectionCase[]
-  notifications   Notification[]
-  callSessions    CallSession[]
+  // ── Communication Consent & Channel Preferences (Phase 1C) ───────────────
+  emailConsent       ConsentState @default(UNKNOWN)
+  emailConsentAt     DateTime?
+  emailConsentSource String?
+
+  whatsappConsent       ConsentState @default(UNKNOWN)
+  whatsappConsentAt     DateTime?
+  whatsappConsentSource String?
+
+  smsConsent       ConsentState @default(UNKNOWN)
+  smsConsentAt     DateTime?
+  smsConsentSource String?
+
+  voiceConsent       ConsentState @default(UNKNOWN)
+  voiceConsentAt     DateTime?
+  voiceConsentSource String?
+
+  tenant                   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoices                 Invoice[]
+  payments                 Payment[]
+  collectionCases          CollectionCase[]
+  notifications            Notification[]
+  callSessions             CallSession[]
   documentDeliveryRequests DocumentDeliveryRequest[]
   paymentRefunds           PaymentRefund[]
   paymentOrderIntents      PaymentOrderIntent[]
+  notificationOutbox       NotificationOutbox[]
 
   @@index([tenantId])
   @@index([tenantId, status])
+}
+
+enum ConsentState {
+  UNKNOWN
+  OPTED_IN
+  OPTED_OUT
 }
 
 enum CustomerStatus {
@@ -132,14 +157,15 @@ model Invoice {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
 
-  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer         @relation(fields: [customerId], references: [id])
-  payments        Payment[]
-  collectionCases CollectionCase[]
-  paymentPromises PaymentPromise[]
+  tenant                   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer                 Customer                  @relation(fields: [customerId], references: [id])
+  payments                 Payment[]
+  collectionCases          CollectionCase[]
+  paymentPromises          PaymentPromise[]
   documentDeliveryRequests DocumentDeliveryRequest[]
   paymentRefunds           PaymentRefund[]
   paymentOrderIntents      PaymentOrderIntent[]
+  notificationOutbox       NotificationOutbox[]
 
   @@unique([number, tenantId])
   @@index([tenantId])
@@ -159,25 +185,26 @@ enum InvoiceStatus {
 
 // ── Payments ──────────────────────────────────────────────────────────────────
 model Payment {
-  id            String        @id @default(cuid())
-  ref           String        @unique
-  customerId    String
-  invoiceId     String
-  amount        Decimal       @db.Decimal(19, 4)
-  currency      String        @default("INR")
-  method        PaymentMethod
-  status        PaymentStatus @default(PENDING)
-  providerRef   String?       // External payment provider reference
-  paidAt        DateTime?
-  notes         String?
-  tenantId      String
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id          String        @id @default(cuid())
+  ref         String        @unique
+  customerId  String
+  invoiceId   String
+  amount      Decimal       @db.Decimal(19, 4)
+  currency    String        @default("INR")
+  method      PaymentMethod
+  status      PaymentStatus @default(PENDING)
+  providerRef String? // External payment provider reference
+  paidAt      DateTime?
+  notes       String?
+  tenantId    String
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
 
-  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer Customer        @relation(fields: [customerId], references: [id])
-  invoice  Invoice         @relation(fields: [invoiceId], references: [id])
-  refunds  PaymentRefund[]
+  tenant             Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer             @relation(fields: [customerId], references: [id])
+  invoice            Invoice              @relation(fields: [invoiceId], references: [id])
+  refunds            PaymentRefund[]
+  notificationOutbox NotificationOutbox[]
 
   @@index([tenantId])
   @@index([customerId])
@@ -277,17 +304,17 @@ enum PaymentStatus {
 
 // ── Collection Cases ──────────────────────────────────────────────────────────
 model CollectionCase {
-  id          String           @id @default(cuid())
-  customerId  String
-  invoiceId   String?
-  assignedTo  String?          // User.id of the assigned agent
-  priority    CasePriority     @default(MEDIUM)
-  status      CaseStatus       @default(OPEN)
-  notes       String?
-  resolvedAt  DateTime?
-  tenantId    String
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  id         String       @id @default(cuid())
+  customerId String
+  invoiceId  String?
+  assignedTo String? // User.id of the assigned agent
+  priority   CasePriority @default(MEDIUM)
+  status     CaseStatus   @default(OPEN)
+  notes      String?
+  resolvedAt DateTime?
+  tenantId   String
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   customer        Customer         @relation(fields: [customerId], references: [id])
@@ -343,29 +370,29 @@ model FollowUpTask {
 
 // ── Call Sessions (Chotu AI) ──────────────────────────────────────────────────
 model CallSession {
-  id               String        @id @default(cuid())
-  collectionCaseId String?
-  customerId       String?
-  userId           String        // agent who initiated
-  livekitRoom      String?
-  duration         Int?          // seconds
-  outcome          CallOutcome?
-  transcript       String?       @db.Text
-  summary          String?       @db.Text
-  stage            String?       // Current or final conversation stage
-  metadata         Json?         // Structured extraction data (PTP amount, date, method, etc.)
-  recordingUrl       String?         // URL of the call audio recording (LiveKit egress output)
-  recordingStatus    RecordingStatus? // Lifecycle of the recording
-  recordingEgressId  String?         // LiveKit egress job id used to resolve the recording
-  startedAt        DateTime      @default(now())
-  endedAt          DateTime?
-  tenantId         String
-  createdAt        DateTime      @default(now())
+  id                String           @id @default(cuid())
+  collectionCaseId  String?
+  customerId        String?
+  userId            String // agent who initiated
+  livekitRoom       String?
+  duration          Int? // seconds
+  outcome           CallOutcome?
+  transcript        String?          @db.Text
+  summary           String?          @db.Text
+  stage             String? // Current or final conversation stage
+  metadata          Json? // Structured extraction data (PTP amount, date, method, etc.)
+  recordingUrl      String? // URL of the call audio recording (LiveKit egress output)
+  recordingStatus   RecordingStatus? // Lifecycle of the recording
+  recordingEgressId String? // LiveKit egress job id used to resolve the recording
+  startedAt         DateTime         @default(now())
+  endedAt           DateTime?
+  tenantId          String
+  createdAt         DateTime         @default(now())
 
-  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer       Customer?       @relation(fields: [customerId], references: [id])
-  agent          User            @relation(fields: [userId], references: [id])
-  collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
+  tenant                   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer                 Customer?                 @relation(fields: [customerId], references: [id])
+  agent                    User                      @relation(fields: [userId], references: [id])
+  collectionCase           CollectionCase?           @relation(fields: [collectionCaseId], references: [id])
   documentDeliveryRequests DocumentDeliveryRequest[]
 
   @@index([tenantId])
@@ -394,16 +421,16 @@ enum RecordingStatus {
 
 // ── Payment Promises ──────────────────────────────────────────────────────────
 model PaymentPromise {
-  id               String         @id @default(cuid())
+  id               String        @id @default(cuid())
   invoiceId        String
   collectionCaseId String?
-  promisedAmount   Decimal        @db.Decimal(19, 4)
+  promisedAmount   Decimal       @db.Decimal(19, 4)
   promisedDate     DateTime
-  status           PromiseStatus  @default(PENDING)
+  status           PromiseStatus @default(PENDING)
   notes            String?
   tenantId         String
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
   invoice        Invoice         @relation(fields: [invoiceId], references: [id])
   collectionCase CollectionCase? @relation(fields: [collectionCaseId], references: [id])
@@ -421,19 +448,20 @@ enum PromiseStatus {
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 model Notification {
-  id         String             @id @default(cuid())
+  id         String              @id @default(cuid())
   customerId String
   channel    NotificationChannel
   template   String
   payload    Json?
-  status     NotifStatus        @default(QUEUED)
+  status     NotifStatus         @default(QUEUED)
   sentAt     DateTime?
   failReason String?
   tenantId   String
-  createdAt  DateTime           @default(now())
+  createdAt  DateTime            @default(now())
 
-  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer Customer @relation(fields: [customerId], references: [id])
+  tenant             Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           Customer            @relation(fields: [customerId], references: [id])
+  notificationOutbox NotificationOutbox?
 
   @@index([tenantId])
   @@index([customerId])
@@ -450,13 +478,104 @@ enum NotifStatus {
   SENT
   DELIVERED
   FAILED
+  SUPPRESSED
+}
+
+// ── Durable Notification Outbox (Phase 2D) ─────────────────────────────────
+model NotificationOutbox {
+  id             String              @id @default(cuid())
+  tenantId       String
+  customerId     String
+  invoiceId      String?
+  paymentId      String?
+  notificationId String?             @unique
+  jobType        OutboxJobType       @default(REMINDER)
+  channel        NotificationChannel
+  template       String
+  stage          ReminderStage?
+  idempotencyKey String
+
+  // Lifecycle & State Machine
+  status            OutboxJobStatus @default(PENDING)
+  scheduledFor      DateTime        @default(now())
+  claimedAt         DateTime?
+  claimedBy         String?
+  leaseToken        String?
+  leaseExpiresAt    DateTime?
+  lastHeartbeatAt   DateTime?
+  dispatchStartedAt DateTime?
+
+  // Differentiated Attempt Accounting
+  claimCount          Int       @default(0)
+  consecutiveFailures Int       @default(0)
+  deliveryAttempts    Int       @default(0)
+  maxAttempts         Int       @default(3)
+  nextRetryAt         DateTime?
+
+  // Payload, Metadata & Provider Correlation
+  payload              Json?
+  lastError            String?
+  provider             String?
+  providerMessageId    String?
+  sentAt               DateTime?
+  completedAt          DateTime?
+  reconciledAt         DateTime?
+  reconciliationSource String?
+  requeuedAt           DateTime?
+  requeuedBy           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Foreign Key Relations
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer     Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  invoice      Invoice?      @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  payment      Payment?      @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  notification Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+
+  // Invariants & Indexes
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@index([status, scheduledFor])
+  @@index([leaseExpiresAt])
+  @@index([nextRetryAt])
+}
+
+enum OutboxJobStatus {
+  PENDING
+  CLAIMED
+  DISPATCHING
+  RETRY_WAIT
+  COMPLETED
+  FAILED
+  SUPPRESSED
+  UNCERTAIN
+  DEAD_LETTER
+}
+
+enum OutboxJobType {
+  REMINDER
+  PAYMENT_RECEIPT
+  CUSTOM_NOTIFICATION
+}
+
+enum ReminderStage {
+  DUE_SOON
+  DUE_TODAY
+  OVERDUE_STAGE_1
+  OVERDUE_STAGE_2
+  OVERDUE_STAGE_3
 }
 
 // ── Integration Config ────────────────────────────────────────────────────────
 model IntegrationConfig {
   id        String   @id @default(cuid())
-  provider  String   // e.g. 'razorpay', 'twilio', 'whatsapp_business'
-  config    Json     // Encrypted at application layer before storing
+  provider  String // e.g. 'razorpay', 'twilio', 'whatsapp_business'
+  config    Json // Encrypted at application layer before storing
   isActive  Boolean  @default(false)
   tenantId  String
   createdAt DateTime @default(now())
@@ -472,7 +591,7 @@ model IntegrationConfig {
 model AuditLog {
   id         String   @id @default(cuid())
   userId     String
-  action     String   // e.g. 'customer.created', 'invoice.updated'
+  action     String // e.g. 'customer.created', 'invoice.updated'
   entityType String?
   entityId   String?
   metadata   Json?
@@ -491,7 +610,7 @@ model AuditLog {
 // ── Action Proposals (AI Confirmation Workflow) ──────────────────────────────
 model ActionProposal {
   id              String         @id @default(cuid())
-  actionType      String         // e.g. 'record_payment_promise', 'dispute_invoice', 'send_notification'
+  actionType      String // e.g. 'record_payment_promise', 'dispute_invoice', 'send_notification'
   toolName        String
   parameters      Json
   summary         String
@@ -501,7 +620,7 @@ model ActionProposal {
   result          Json?
   expiresAt       DateTime?
   executedAt      DateTime?
-  proposedBy      String         // e.g. 'CHOTU_AI' or userId
+  proposedBy      String // e.g. 'CHOTU_AI' or userId
   reviewedBy      String?
   tenantId        String
   createdAt       DateTime       @default(now())
@@ -594,18 +713,18 @@ model DocumentDeliveryRequest {
   requestType     DocumentRequestType       @default(BOTH)
   deliveryChannel DeliveryChannelPreference @default(WHATSAPP_AND_EMAIL)
   status          DocumentDeliveryStatus    @default(PENDING)
-  requestedBy     String                    // 'CHOTU_VOICE', 'MANUAL_AGENT', 'CUSTOMER'
+  requestedBy     String // 'CHOTU_VOICE', 'MANUAL_AGENT', 'CUSTOMER'
   idempotencyKey  String?                   @unique
-  metadata        Json?                     // Stores payment link URL, token, invoice details, cancellation reasons
+  metadata        Json? // Stores payment link URL, token, invoice details, cancellation reasons
   requestedAt     DateTime                  @default(now())
   createdAt       DateTime                  @default(now())
   updatedAt       DateTime                  @updatedAt
 
-  tenant          Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  customer        Customer                  @relation(fields: [customerId], references: [id])
-  invoice         Invoice                   @relation(fields: [invoiceId], references: [id])
-  callSession     CallSession?              @relation(fields: [callSessionId], references: [id])
-  attempts        DeliveryAttempt[]
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer    Customer          @relation(fields: [customerId], references: [id])
+  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
+  callSession CallSession?      @relation(fields: [callSessionId], references: [id])
+  attempts    DeliveryAttempt[]
 
   @@index([tenantId])
   @@index([customerId])
@@ -620,9 +739,9 @@ model DeliveryAttempt {
   tenantId          String
   requestId         String
   channel           DeliveryAttemptChannel // WHATSAPP or EMAIL
-  destinationMasked String                 // e.g. "+91 98****3210" or "c****r@domain.com"
+  destinationMasked String // e.g. "+91 98****3210" or "c****r@domain.com"
   status            DeliveryAttemptStatus  @default(PENDING)
-  provider          String                 // 'WHATSAPP_CLOUD', 'RESEND', 'SIMULATED'
+  provider          String // 'WHATSAPP_CLOUD', 'RESEND', 'SIMULATED'
   providerMessageId String?
   errorCode         String?
   errorMessage      String?
@@ -631,8 +750,8 @@ model DeliveryAttempt {
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
 
-  tenant            Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  request           DocumentDeliveryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  tenant  Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  request DocumentDeliveryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
   @@index([requestId])
@@ -650,5 +769,3 @@ model WebhookReplay {
 
   @@index([expiresAt])
 }
-
-

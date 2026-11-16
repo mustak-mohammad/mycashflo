@@ -132,7 +132,7 @@ export interface ApiError {
 // ── Phase 6: Collections Intelligence, Notifications & Audit ──────────────────
 
 export type NotificationChannel = 'WHATSAPP' | 'EMAIL' | 'SMS'
-export type NotifStatus = 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED'
+export type NotifStatus = 'QUEUED' | 'SENT' | 'DELIVERED' | 'FAILED' | 'SUPPRESSED'
 
 export interface Notification {
   id: string

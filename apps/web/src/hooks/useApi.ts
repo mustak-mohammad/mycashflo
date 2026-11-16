@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { extractSafeErrorMessage } from '../utils/safeError'
 
 interface UseApiState<T> {
   data: T | null
@@ -10,9 +11,6 @@ interface UseApiState<T> {
 /**
  * Generic data-fetching hook.
  * Re-runs whenever the `fetcher` reference changes (use stable refs or deps).
- *
- * @example
- * const { data, loading, error } = useApi(() => customersApi.list({ page: 1 }))
  */
 export function useApi<T>(fetcher: () => Promise<T>): UseApiState<T> {
   const [data, setData] = useState<T | null>(null)
@@ -31,20 +29,18 @@ export function useApi<T>(fetcher: () => Promise<T>): UseApiState<T> {
       }
     } catch (err: unknown) {
       if (id === counterRef.current) {
-        const msg =
-          (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
-          (err instanceof Error ? err.message : 'An unexpected error occurred')
-        setError(msg)
+        setError(extractSafeErrorMessage(err, 'An unexpected error occurred'))
       }
     } finally {
       if (id === counterRef.current) {
         setLoading(false)
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetcher])
 
-  useEffect(() => { run() }, [run])
+  useEffect(() => {
+    void run()
+  }, [run])
 
   return { data, loading, error, refetch: run }
 }

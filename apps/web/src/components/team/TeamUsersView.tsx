@@ -1,10 +1,15 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { usersApi, type UserItem } from '../../api/users'
 import { useAuth } from '../../store/AuthContext'
+import { useToast } from '../../store/ToastContext'
 import { PasswordInput } from '../ui/PasswordInput'
+import { ConfirmDialog } from '../ui/ConfirmDialog'
+import { evaluatePasswordPolicy } from '../../utils/passwordPolicy'
+import { extractSafeErrorMessage } from '../../utils/safeError'
 
 export function TeamUsersView() {
   const { user: currentUser } = useAuth()
+  const toast = useToast()
   const [users, setUsers] = useState<UserItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -16,7 +21,23 @@ export function TeamUsersView() {
   const [submitting, setSubmitting] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
 
+  const [pendingRoleChange, setPendingRoleChange] = useState<{
+    user: UserItem
+    nextRole: 'ADMIN' | 'MANAGER' | 'AGENT'
+  } | null>(null)
+  const [pendingStatusToggle, setPendingStatusToggle] = useState<UserItem | null>(null)
+  const [confirmingAction, setConfirmingAction] = useState(false)
+  const [confirmError, setConfirmError] = useState<string | null>(null)
+  const actionInFlightRef = useRef(false)
+
+  const isTenantAdmin = currentUser?.role === 'ADMIN'
+
   const loadUsers = async () => {
+    if (!isTenantAdmin) {
+      setError('User management is restricted to Tenant Administrators (ADMIN).')
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setError(null)
     try {
@@ -30,13 +51,23 @@ export function TeamUsersView() {
   }
 
   useEffect(() => {
-    loadUsers()
-  }, [])
+    if (isTenantAdmin) {
+      loadUsers()
+    } else {
+      setLoading(false)
+    }
+  }, [isTenantAdmin])
+
+  const passwordPolicy = evaluatePasswordPolicy(newPassword)
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!newName.trim() || !newEmail.trim() || !newPassword.trim()) {
+    if (!newName.trim() || !newEmail.trim() || !newPassword) {
       setModalError('Name, email, and password are required.')
+      return
+    }
+    if (passwordPolicy.errorMessage) {
+      setModalError(passwordPolicy.errorMessage)
       return
     }
     setSubmitting(true)
@@ -48,35 +79,72 @@ export function TeamUsersView() {
         password: newPassword,
         role: newRole,
       })
+      toast.success(`Team member ${newName.trim()} created (${newRole}).`)
       setIsModalOpen(false)
       setNewName('')
       setNewEmail('')
       setNewPassword('')
       setNewRole('AGENT')
       await loadUsers()
-    } catch (err: any) {
-      setModalError(err?.response?.data?.message || err.message || 'Failed to create user')
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to create user')
+      setModalError(msg)
+      toast.error(msg)
     } finally {
       setSubmitting(false)
     }
   }
 
-  const handleRoleChange = async (targetUser: UserItem, newRoleValue: 'ADMIN' | 'MANAGER' | 'AGENT') => {
-    if (targetUser.role === newRoleValue) return
+  const handleRequestRoleChange = (targetUser: UserItem, nextRole: 'ADMIN' | 'MANAGER' | 'AGENT') => {
+    if (targetUser.role === nextRole) return
+    setConfirmError(null)
+    setPendingRoleChange({ user: targetUser, nextRole })
+  }
+
+  const handleConfirmRoleChange = async () => {
+    if (!pendingRoleChange || actionInFlightRef.current) return
+    actionInFlightRef.current = true
+    setConfirmingAction(true)
+    setConfirmError(null)
     try {
-      await usersApi.update(targetUser.id, { role: newRoleValue })
+      await usersApi.update(pendingRoleChange.user.id, { role: pendingRoleChange.nextRole })
+      toast.success(
+        `Updated ${pendingRoleChange.user.name}'s role to ${pendingRoleChange.nextRole}.`,
+      )
+      setPendingRoleChange(null)
       await loadUsers()
-    } catch (err: any) {
-      alert(`Failed to update role: ${err?.response?.data?.message || err.message}`)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to update role.')
+      setConfirmError(msg)
+      toast.error(msg)
+    } finally {
+      setConfirmingAction(false)
+      actionInFlightRef.current = false
     }
   }
 
-  const handleToggleActive = async (targetUser: UserItem) => {
+  const handleConfirmToggleActive = async () => {
+    if (!pendingStatusToggle || actionInFlightRef.current) return
+    actionInFlightRef.current = true
+    setConfirmingAction(true)
+    setConfirmError(null)
+    const nextActive = !pendingStatusToggle.isActive
     try {
-      await usersApi.update(targetUser.id, { isActive: !targetUser.isActive })
+      await usersApi.update(pendingStatusToggle.id, { isActive: nextActive })
+      toast.success(
+        nextActive
+          ? `Reactivated ${pendingStatusToggle.name}.`
+          : `Deactivated ${pendingStatusToggle.name}.`,
+      )
+      setPendingStatusToggle(null)
       await loadUsers()
-    } catch (err: any) {
-      alert(`Failed to update status: ${err?.response?.data?.message || err.message}`)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to update user status.')
+      setConfirmError(msg)
+      toast.error(msg)
+    } finally {
+      setConfirmingAction(false)
+      actionInFlightRef.current = false
     }
   }
 
@@ -159,8 +227,11 @@ export function TeamUsersView() {
                     <td className="px-5 py-3.5 font-mono text-white/70">{u.email}</td>
                     <td className="px-5 py-3.5">
                       <select
+                        aria-label={`Role for ${u.name}`}
                         value={u.role}
-                        onChange={(e) => handleRoleChange(u, e.target.value as any)}
+                        onChange={(e) =>
+                          handleRequestRoleChange(u, e.target.value as 'ADMIN' | 'MANAGER' | 'AGENT')
+                        }
                         disabled={u.id === currentUser?.id}
                         className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500 disabled:opacity-50"
                       >
@@ -191,7 +262,10 @@ export function TeamUsersView() {
                       {u.id !== currentUser?.id && (
                         <button
                           type="button"
-                          onClick={() => handleToggleActive(u)}
+                          onClick={() => {
+                            setConfirmError(null)
+                            setPendingStatusToggle(u)
+                          }}
                           className="px-2.5 py-1 rounded text-[11px] bg-white/5 hover:bg-white/10 text-white/70 hover:text-white cursor-pointer"
                         >
                           {u.isActive ? 'Deactivate' : 'Reactivate'}
@@ -260,14 +334,45 @@ export function TeamUsersView() {
                 </div>
 
                 <div>
-                  <label className="block text-white/70 mb-1">Temporary Password *</label>
+                  <label htmlFor="invite-temp-password" className="block text-white/70 mb-1">
+                    Temporary Password *
+                  </label>
                   <PasswordInput
+                    id="invite-temp-password"
                     required
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Minimum 6 characters..."
+                    placeholder="Min 8 chars, upper, lower, number/symbol"
                     className="w-full p-2.5 rounded-lg bg-black/40 border border-white/10 text-white focus:outline-none focus:border-indigo-500"
                   />
+                  {newPassword.length > 0 && (
+                    <div className="mt-2 p-2.5 rounded-lg bg-black/30 border border-white/10 text-[11px] space-y-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className={passwordPolicy.hasMinLength ? 'text-emerald-400' : 'text-slate-500'}>
+                          {passwordPolicy.hasMinLength ? '✓' : '○'}
+                        </span>
+                        <span className={passwordPolicy.hasMinLength ? 'text-slate-200' : 'text-slate-400'}>
+                          At least 8 characters
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={passwordPolicy.hasMixedCase ? 'text-emerald-400' : 'text-slate-500'}>
+                          {passwordPolicy.hasMixedCase ? '✓' : '○'}
+                        </span>
+                        <span className={passwordPolicy.hasMixedCase ? 'text-slate-200' : 'text-slate-400'}>
+                          Uppercase and lowercase letters
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className={passwordPolicy.hasNumberOrSymbol ? 'text-emerald-400' : 'text-slate-500'}>
+                          {passwordPolicy.hasNumberOrSymbol ? '✓' : '○'}
+                        </span>
+                        <span className={passwordPolicy.hasNumberOrSymbol ? 'text-slate-200' : 'text-slate-400'}>
+                          At least one number or special symbol
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -294,8 +399,8 @@ export function TeamUsersView() {
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
-                  className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50 cursor-pointer shadow-lg shadow-indigo-600/30"
+                  disabled={submitting || !passwordPolicy.isValid}
+                  className="px-5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shadow-lg shadow-indigo-600/30"
                 >
                   {submitting ? 'Creating…' : 'Create User'}
                 </button>
@@ -304,6 +409,48 @@ export function TeamUsersView() {
           </div>
         </div>
       )}
+
+      {/* Confirm Role Change Dialog */}
+      <ConfirmDialog
+        open={Boolean(pendingRoleChange)}
+        title="Confirm Role Change"
+        description={
+          pendingRoleChange
+            ? `Change access role for ${pendingRoleChange.user.name} (${pendingRoleChange.user.email}) from ${pendingRoleChange.user.role} to ${pendingRoleChange.nextRole}?`
+            : ''
+        }
+        confirmLabel="Confirm Role Change"
+        variant="warning"
+        loading={confirmingAction}
+        errorMessage={confirmError}
+        onCancel={() => {
+          setPendingRoleChange(null)
+          setConfirmError(null)
+        }}
+        onConfirm={handleConfirmRoleChange}
+      />
+
+      {/* Confirm Activate / Deactivate Dialog */}
+      <ConfirmDialog
+        open={Boolean(pendingStatusToggle)}
+        title={pendingStatusToggle?.isActive ? 'Deactivate Team Member' : 'Reactivate Team Member'}
+        description={
+          pendingStatusToggle
+            ? pendingStatusToggle.isActive
+              ? `Are you sure you want to deactivate ${pendingStatusToggle.name} (${pendingStatusToggle.email})? They will immediately lose access to sign in.`
+              : `Are you sure you want to reactivate ${pendingStatusToggle.name} (${pendingStatusToggle.email})?`
+            : ''
+        }
+        confirmLabel={pendingStatusToggle?.isActive ? 'Deactivate User' : 'Reactivate User'}
+        variant={pendingStatusToggle?.isActive ? 'danger' : 'primary'}
+        loading={confirmingAction}
+        errorMessage={confirmError}
+        onCancel={() => {
+          setPendingStatusToggle(null)
+          setConfirmError(null)
+        }}
+        onConfirm={handleConfirmToggleActive}
+      />
     </div>
   )
 }

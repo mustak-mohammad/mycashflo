@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { getPlatformSettings, type PlatformSettings } from '../../api/platform'
 import { useAuth } from '../../store/AuthContext'
 import { authApi } from '../../api/auth'
+import { ChangePasswordCard } from '../../components/auth/ChangePasswordCard'
 
 export default function SystemSettingsPage() {
   const { user, updateUser } = useAuth()
@@ -235,15 +236,18 @@ export default function SystemSettingsPage() {
             </div>
 
             <div className="p-3 rounded-lg bg-slate-900/50 border border-slate-800/80 text-[11px] text-slate-400 flex items-start gap-2">
-              <span className="text-amber-400 text-sm mt-0.5">🔒</span>
+              <span className="text-emerald-400 text-sm mt-0.5">🔒</span>
               <div>
-                <span className="font-semibold text-slate-300 block mb-0.5">Password Policy</span>
-                Self-service password alteration is disabled for Super Admin platform accounts. Credential rotation is managed securely via owner console bootstrap (<code className="text-slate-300 font-mono">npm run super-admin:bootstrap</code>).
+                <span className="font-semibold text-slate-300 block mb-0.5">Password Policy & Invalidation</span>
+                Self-service password alteration is protected with current-password validation and bcrypt hashing. Active sessions and refresh tokens are automatically invalidated upon credential rotation.
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* ─── Card 0.5: Secure Password Management ─────────────────────────── */}
+      <ChangePasswordCard userRole={user?.role} />
 
       {/* ─── Platform Posture Cards (4 Distinct Sections) ────────────── */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5 text-xs">
@@ -486,15 +490,35 @@ export default function SystemSettingsPage() {
 
             <div className="space-y-3">
               <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
-                <span className="text-slate-300">Razorpay Gateway</span>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                    settings?.providers.razorpay.configured
-                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
-                      : 'bg-slate-800 text-slate-400'
-                  }`}
-                >
-                  {settings?.providers.razorpay.configured ? 'Configured' : 'Not configured'}
+                <div className="flex flex-col">
+                  <span className="text-slate-300">Razorpay Gateway</span>
+                  <span className="text-[10px] text-slate-500">API Credentials</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {settings?.providers.razorpay.configured && settings?.providers.razorpay.mode && (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold uppercase bg-amber-950/70 text-amber-300 border border-amber-800">
+                      {settings.providers.razorpay.mode}
+                    </span>
+                  )}
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                      settings?.providers.razorpay.configured
+                        ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800'
+                        : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {settings?.providers.razorpay.configured ? 'Configured' : 'Not configured'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between py-1 border-b border-slate-800/40">
+                <div className="flex flex-col">
+                  <span className="text-slate-300">Razorpay Webhooks</span>
+                  <span className="text-[10px] text-slate-500">Public Ingress Endpoint</span>
+                </div>
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-950/80 text-amber-300 border border-amber-800">
+                  {settings?.providers.razorpay.webhookConfigured ? 'Active' : 'Pending Public Endpoint'}
                 </span>
               </div>
 

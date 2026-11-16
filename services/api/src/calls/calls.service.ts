@@ -1,13 +1,22 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException, Optional } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, ConflictException, UnauthorizedException, Optional, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { RecorderService } from '../voice/recorder.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import { IntegrationsService } from '../integrations/integrations.service.js';
+import { SipTelephonyAdapter } from '../integrations/adapters/sip-telephony.adapter.js';
+import type { TelephonyWebhookContext } from '../integrations/adapters/sip-telephony.adapter.js';
 import { SipRequestBuilder } from '../integrations/builders/sip-request.builder.js';
+import {
+  claimWebhookReplayKey as claimSharedWebhookReplayKey,
+  pruneExpiredWebhookReplays,
+  DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+} from '../common/webhook-replay.util.js';
+import { evaluateCustomerConsent } from '../common/consent-policy.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
-import { IsOptional, IsEnum, IsString, IsNumber } from 'class-validator';
+import { IsOptional, IsEnum, IsString, IsNumber, IsObject } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { CallOutcome } from '@prisma/client';
@@ -72,6 +81,16 @@ export class CreateCallDto {
   @IsString()
   summary?: string;
 
+  @ApiPropertyOptional({ description: 'Final conversation stage reached' })
+  @IsOptional()
+  @IsString()
+  stage?: string;
+
+  @ApiPropertyOptional({ description: 'Structured metadata and summary payload' })
+  @IsOptional()
+  @IsObject()
+  metadata?: Record<string, any>;
+
   @ApiPropertyOptional({ description: 'LiveKit egress job id for the call recording' })
   @IsOptional()
   @IsString()
@@ -104,14 +123,82 @@ export class InitiateOutboundCallDto {
   reason?: string;
 }
 
+export class UpdateCallOutcomeDto {
+  @ApiProperty({ enum: CallOutcome })
+  @IsEnum(CallOutcome)
+  outcome: CallOutcome;
+
+  @ApiPropertyOptional({ description: 'Optional agent notes explaining the outcome update' })
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
 @Injectable()
 export class CallsService {
+  private readonly logger = new Logger(CallsService.name);
+  private readonly defaultTelephonyAdapter = new SipTelephonyAdapter();
+  private readonly processedWebhookKeys = new Map<string, number>();
+  private readonly WEBHOOK_REPLAY_TTL_MS = 15 * 60 * 1000;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly recorder: RecorderService,
     @Optional() private readonly auditLogs?: AuditLogsService,
     @Optional() private readonly integrations?: IntegrationsService,
+    @Optional() private readonly config?: ConfigService,
   ) {}
+
+  getWebhookBaseUrl(): string | undefined {
+    return (
+      this.config?.get<string>('TELEPHONY_WEBHOOK_BASE_URL') ??
+      process.env.TELEPHONY_WEBHOOK_BASE_URL
+    );
+  }
+
+  private async claimWebhookReplayKey(
+    prismaOrTx: any,
+    provider: string,
+    key: string,
+  ): Promise<boolean> {
+    if (prismaOrTx.webhookReplay && typeof prismaOrTx.webhookReplay.create === 'function') {
+      return claimSharedWebhookReplayKey(
+        prismaOrTx,
+        provider,
+        key,
+        DEFAULT_WEBHOOK_REPLAY_TTL_MS,
+      );
+    }
+
+    // Unit-test fallback when mockPrisma omits webhookReplay
+    if (this.hasSeenWebhookReplayKey(key)) {
+      return false;
+    }
+    this.recordWebhookReplayKey(key);
+    return true;
+  }
+
+  private hasSeenWebhookReplayKey(key: string): boolean {
+    const now = Date.now();
+    if (this.processedWebhookKeys.size > 1000) {
+      for (const [k, ts] of this.processedWebhookKeys.entries()) {
+        if (now - ts > this.WEBHOOK_REPLAY_TTL_MS) {
+          this.processedWebhookKeys.delete(k);
+        }
+      }
+    }
+    const existingTs = this.processedWebhookKeys.get(key);
+    if (!existingTs) return false;
+    if (now - existingTs > this.WEBHOOK_REPLAY_TTL_MS) {
+      this.processedWebhookKeys.delete(key);
+      return false;
+    }
+    return true;
+  }
+
+  private recordWebhookReplayKey(key: string): void {
+    this.processedWebhookKeys.set(key, Date.now());
+  }
 
   async findAll(user: AuthUser, query: CallQueryDto) {
     const { tenantId, role, userId } = user;
@@ -252,6 +339,8 @@ export class CallsService {
         outcome: dto.outcome,
         transcript: dto.transcript,
         summary: dto.summary,
+        stage: dto.stage,
+        metadata: dto.metadata,
         recordingEgressId: dto.recordingEgressId,
         recordingUrl: dto.recordingUrl,
         recordingStatus: dto.recordingUrl
@@ -319,7 +408,7 @@ export class CallsService {
   /**
    * Save uploaded audio recording buffer to disk and mark CallSession as AVAILABLE
    */
-  async saveRecording(id: string, user: AuthUser, buffer: Buffer, mimeType: string = 'audio/webm') {
+  async saveRecording(id: string, user: AuthUser, buffer: Buffer, mimeType: string = 'audio/webm', duration?: number) {
     const call = await this.prisma.callSession.findFirst({
       where: { id, tenantId: user.tenantId },
     });
@@ -327,6 +416,10 @@ export class CallsService {
 
     if (user.role === 'AGENT' && call.userId && call.userId !== user.userId) {
       throw new ForbiddenException('Access denied: You are not authorized to upload recordings for this call session');
+    }
+
+    if (!buffer || buffer.length === 0) {
+      throw new BadRequestException('Invalid audio upload: recording buffer cannot be empty');
     }
 
     const tenantDir = this.getUploadsDir(user.tenantId);
@@ -343,11 +436,25 @@ export class CallsService {
     const streamUrl = `/api/calls/${id}/recording/stream`;
     const downloadUrl = `/api/calls/${id}/recording/download`;
 
+    // Persist recording metadata in CallSession
+    const existingMeta = (call.metadata as Record<string, any>) || {};
+    const updatedMeta = {
+      ...existingMeta,
+      recording: {
+        mimeType,
+        size: buffer.length,
+        duration: duration || call.duration || 0,
+        storagePath: `${user.tenantId}/${id}${ext}`,
+        uploadedAt: new Date().toISOString(),
+      },
+    };
+
     await this.prisma.callSession.update({
       where: { id },
       data: {
         recordingUrl: streamUrl,
         recordingStatus: 'AVAILABLE',
+        metadata: updatedMeta,
       },
     });
 
@@ -358,6 +465,12 @@ export class CallsService {
       downloadUrl,
       size: buffer.length,
       fileSize: buffer.length,
+      mimeType,
+      metadata: {
+        ...updatedMeta.recording,
+        recording: updatedMeta.recording,
+      },
+      recording: updatedMeta.recording,
     };
   }
 
@@ -443,7 +556,7 @@ export class CallsService {
       throw new NotFoundException('Customer not found in tenant');
     }
 
-    // 2. Strict DND / Opt-Out Enforcement
+    // 2. Strict DND / Opt-Out Enforcement & Centralized Consent Policy (Phase 1C.1)
     if (
       (customer.notes &&
         (customer.notes.includes('DND:NO_CONTACT') ||
@@ -453,6 +566,13 @@ export class CallsService {
     ) {
       throw new BadRequestException(
         'Outbound call suppressed: Customer has an active Do-Not-Contact (cease-contact) preference',
+      );
+    }
+
+    const consentEval = evaluateCustomerConsent(customer, 'VOICE');
+    if (!consentEval.allowed) {
+      throw new BadRequestException(
+        `Outbound call suppressed: ${consentEval.reason}`,
       );
     }
 
@@ -586,71 +706,267 @@ export class CallsService {
     };
   }
 
-  async handleTelephonyWebhook(provider: string, payload: any) {
-    const callback = this.integrations?.telephony
-      ? this.integrations.telephony.parseStatusCallback(payload)
-      : {
-          callSid: payload?.CallSid || payload?.callSid || payload?.id || `CA_${Date.now()}`,
-          status: 'completed',
-          duration: 0,
-          timestamp: new Date(),
-        };
+  async handleTelephonyWebhook(
+    provider: string,
+    payload: any,
+    context?: TelephonyWebhookContext,
+  ) {
+    const telephonyAdapter = this.integrations?.telephony ?? this.defaultTelephonyAdapter;
 
-    const sessions = await this.prisma.callSession.findMany({
-      where: {
-        OR: [
-          { livekitRoom: `sip-${callback.callSid}` },
-          { livekitRoom: callback.callSid },
-          { id: callback.callSid },
-        ],
-      },
-      take: 1,
-    });
+    // 1. Validate provider early (throws BadRequestException for unsupported providers)
+    const canonicalProvider = telephonyAdapter.normalizeWebhookProvider(provider);
 
-    if (sessions.length > 0) {
-      const session = sessions[0];
-      const metadata = (session.metadata as Record<string, any>) || {};
-      const updatedMetadata: Record<string, any> = {
-        ...metadata,
-        carrierStatus: callback.status,
-        lastCallbackAt: new Date().toISOString(),
-      };
+    // 2. Read-only lookup of matching CallSession (if any) to support per-tenant SIP webhook secrets
+    const candidateSid =
+      payload?.CallSid ||
+      payload?.callSid ||
+      payload?.room?.name ||
+      payload?.egressInfo?.roomName ||
+      payload?.id;
 
-      if (callback.status === 'busy') {
-        updatedMetadata.busyAt = new Date().toISOString();
-      } else if (callback.status === 'failed') {
-        updatedMetadata.failedAt = new Date().toISOString();
-      }
-
-      const terminalStatuses = ['completed', 'failed', 'no-answer'];
-      const isTerminal = terminalStatuses.includes(callback.status);
-
-      await this.prisma.callSession.update({
-        where: { id: session.id },
-        data: {
-          duration: callback.duration !== undefined ? callback.duration : session.duration,
-          endedAt: isTerminal ? (session.endedAt || new Date()) : session.endedAt,
-          metadata: updatedMetadata,
+    let sessions: any[] = [];
+    if (candidateSid && typeof candidateSid === 'string') {
+      sessions = await this.prisma.callSession.findMany({
+        where: {
+          OR: [
+            { livekitRoom: `sip-${candidateSid}` },
+            { livekitRoom: candidateSid },
+            { id: candidateSid },
+          ],
         },
+        take: 1,
       });
+    }
 
-      if (this.auditLogs) {
-        await this.auditLogs.log({
-          tenantId: session.tenantId,
-          userId: session.userId,
-          action: 'telephony.status_callback',
-          entityType: 'CallSession',
-          entityId: session.id,
-          metadata: {
-            callSid: callback.callSid,
-            carrierStatus: callback.status,
-            provider,
-          },
-        });
+    let tenantSecrets: TelephonyWebhookContext['secrets'] = {
+      twilioAuthToken:
+        this.config?.get<string>('TWILIO_AUTH_TOKEN') ?? process.env.TWILIO_AUTH_TOKEN,
+      livekitApiKey:
+        this.config?.get<string>('LIVEKIT_API_KEY') ?? process.env.LIVEKIT_API_KEY,
+      livekitWebhookSecret:
+        this.config?.get<string>('LIVEKIT_WEBHOOK_SECRET') ??
+        this.config?.get<string>('LIVEKIT_API_SECRET') ??
+        process.env.LIVEKIT_WEBHOOK_SECRET ??
+        process.env.LIVEKIT_API_SECRET,
+      exotelToken:
+        this.config?.get<string>('EXOTEL_WEBHOOK_TOKEN') ?? process.env.EXOTEL_WEBHOOK_TOKEN,
+      webhookSecret:
+        this.config?.get<string>('TELEPHONY_WEBHOOK_SECRET') ??
+        this.config?.get<string>('SIP_WEBHOOK_SECRET') ??
+        process.env.TELEPHONY_WEBHOOK_SECRET ??
+        process.env.SIP_WEBHOOK_SECRET,
+    };
+
+    if (sessions.length > 0 && this.integrations?.getRawConfig) {
+      try {
+        const tenantCfg = await this.integrations.getRawConfig(sessions[0].tenantId, 'SIP_TELEPHONY');
+        if (tenantCfg && typeof tenantCfg === 'object') {
+          tenantSecrets = {
+            ...tenantSecrets,
+            twilioAuthToken: tenantCfg.authToken || tenantSecrets.twilioAuthToken,
+            exotelToken: tenantCfg.webhookSecret || tenantCfg.authToken || tenantSecrets.exotelToken,
+            webhookSecret: tenantCfg.webhookSecret || tenantCfg.authToken || tenantSecrets.webhookSecret,
+          };
+        }
+      } catch {
+        // Non-fatal; rely on environment-configured secrets
       }
     }
 
-    return { received: true, callSid: callback.callSid, status: callback.status };
+    // 3. Authenticate webhook request BEFORE any replay tracking, DB write, or audit log
+    const verified = await telephonyAdapter.verifyWebhookRequest(provider, payload, {
+      ...context,
+      secrets: {
+        ...tenantSecrets,
+        ...(context?.secrets || {}),
+      },
+    });
+
+    const effectivePayload = verified.verifiedPayload ?? payload;
+    const callback = telephonyAdapter.parseStatusCallback(effectivePayload);
+    if (canonicalProvider === 'LIVEKIT_SIP' && verified.verifiedPayload) {
+      const lkEvent = verified.verifiedPayload;
+      const roomName = lkEvent?.room?.name || lkEvent?.egressInfo?.roomName;
+      if (roomName) {
+        callback.callSid = roomName;
+      }
+      if (lkEvent?.event === 'room_finished') {
+        callback.status = 'completed';
+      } else if (lkEvent?.event === 'room_started') {
+        callback.status = 'in-progress';
+      }
+    }
+
+    const replayKey = verified.idempotencyKey
+      ? `${verified.provider}:id:${verified.idempotencyKey}`
+      : `${verified.provider}:fp:${verified.signatureFingerprint}`;
+
+    const runInTransaction = async <T>(work: (tx: any) => Promise<T>): Promise<T> => {
+      if (typeof this.prisma.$transaction === 'function') {
+        return this.prisma.$transaction(work);
+      }
+      return work(this.prisma);
+    };
+
+    const updatedSession = await runInTransaction(async (tx) => {
+      // 4. Atomic shared PostgreSQL replay claim + CallSession update
+      const claimed = await this.claimWebhookReplayKey(tx, verified.provider, replayKey);
+      if (!claimed) {
+        this.logger.warn(`Rejected replayed telephony webhook for provider=${verified.provider}`);
+        throw new UnauthorizedException('Duplicate or replayed telephony webhook rejected');
+      }
+
+      let targetSessions = sessions;
+      if (targetSessions.length === 0 && callback.callSid) {
+        targetSessions = await tx.callSession.findMany({
+          where: {
+            OR: [
+              { livekitRoom: `sip-${callback.callSid}` },
+              { livekitRoom: callback.callSid },
+              { id: callback.callSid },
+            ],
+          },
+          take: 1,
+        });
+      }
+
+      if (targetSessions.length > 0) {
+        const session = targetSessions[0];
+        const metadata = (session.metadata as Record<string, any>) || {};
+        const updatedMetadata: Record<string, any> = {
+          ...metadata,
+          carrierStatus: callback.status,
+          verifiedProvider: canonicalProvider,
+          lastCallbackAt: new Date().toISOString(),
+        };
+
+        if (callback.status === 'busy') {
+          updatedMetadata.busyAt = new Date().toISOString();
+        } else if (callback.status === 'failed') {
+          updatedMetadata.failedAt = new Date().toISOString();
+        }
+
+        const terminalStatuses = ['completed', 'failed', 'no-answer'];
+        const isTerminal = terminalStatuses.includes(callback.status);
+
+        await tx.callSession.update({
+          where: { id: session.id },
+          data: {
+            duration: callback.duration !== undefined ? callback.duration : session.duration,
+            endedAt: isTerminal ? (session.endedAt || new Date()) : session.endedAt,
+            metadata: updatedMetadata,
+          },
+        });
+
+        return session;
+      }
+
+      return null;
+    });
+
+    if (updatedSession && this.auditLogs) {
+      await this.auditLogs.log({
+        tenantId: updatedSession.tenantId,
+        userId: updatedSession.userId,
+        action: 'telephony.status_callback',
+        entityType: 'CallSession',
+        entityId: updatedSession.id,
+        metadata: {
+          callSid: callback.callSid,
+          carrierStatus: callback.status,
+          provider: canonicalProvider,
+        },
+      });
+    }
+
+    if (Math.random() < 0.05) {
+      pruneExpiredWebhookReplays(this.prisma).catch(() => {});
+    }
+
+    return {
+      received: true,
+      provider: canonicalProvider,
+      callSid: callback.callSid,
+      status: callback.status,
+    };
+  }
+
+  /**
+   * Update outcome and notes for a call session (preserves audit trail in metadata.outcomeAudit)
+   */
+  async updateOutcome(id: string, user: AuthUser, dto: UpdateCallOutcomeDto) {
+    const call = await this.prisma.callSession.findFirst({
+      where: { id, tenantId: user.tenantId },
+      include: {
+        customer: { select: { id: true, name: true, phone: true } },
+        agent: { select: { id: true, name: true, email: true } },
+      },
+    });
+    if (!call) throw new NotFoundException('Call session not found');
+
+    if (user.role === 'AGENT' && call.userId && call.userId !== user.userId) {
+      throw new ForbiddenException('Access denied: You are not authorized to update this call session');
+    }
+
+    // Safety rule: Prevent manual override to PROMISE_TO_PAY without explicit note or confirmed commitment
+    if (dto.outcome === 'PROMISE_TO_PAY') {
+      const metadata = (call.metadata as Record<string, any>) || {};
+      const commitmentStatus =
+        metadata?.structuredSummary?.paymentCommitment ||
+        metadata?.summary?.paymentCommitment ||
+        metadata?.extractedData?.commitmentStatus;
+      const hasExplicitNote = dto.notes && dto.notes.trim().length >= 5;
+      if (commitmentStatus !== 'CONFIRMED' && !hasExplicitNote) {
+        throw new BadRequestException(
+          'Cannot set outcome to PROMISE_TO_PAY without a confirmed commitment or detailed notes explaining the customer commitment',
+        );
+      }
+    }
+
+    const existingMeta = (call.metadata as Record<string, any>) || {};
+    const updatedMeta = {
+      ...existingMeta,
+      agentNotes: dto.notes ? dto.notes.trim() : existingMeta.agentNotes,
+      outcomeAudit: [
+        ...(existingMeta.outcomeAudit || []),
+        {
+          previousOutcome: call.outcome,
+          newOutcome: dto.outcome,
+          updatedBy: user.userId,
+          updatedAt: new Date().toISOString(),
+          notes: dto.notes || null,
+        },
+      ],
+    };
+
+    const updated = await this.prisma.callSession.update({
+      where: { id },
+      data: {
+        outcome: dto.outcome,
+        metadata: updatedMeta,
+      },
+      include: {
+        customer: { select: { id: true, name: true, phone: true } },
+        agent: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (this.auditLogs) {
+      await this.auditLogs.log({
+        tenantId: user.tenantId,
+        userId: user.userId,
+        action: 'call.outcome_updated',
+        entityType: 'CallSession',
+        entityId: id,
+        metadata: {
+          previousOutcome: call.outcome,
+          newOutcome: dto.outcome,
+          notes: dto.notes || null,
+        },
+      });
+    }
+
+    return updated;
   }
 }
 

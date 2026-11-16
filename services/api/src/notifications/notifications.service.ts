@@ -9,6 +9,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
 import { validateCompanyContactNumber } from '../integrations/adapters/whatsapp-cloud.adapter.js';
+import { evaluateCustomerConsent } from '../common/consent-policy.js';
 import {
   WhatsAppInboundSafetyService,
   type InboundResolutionResult,
@@ -514,10 +515,32 @@ export class NotificationsService {
       }
     }
 
-    // 2. Contact-Permission & Opt-out Guard: Strict enforcement of DND preferences
-    if (customer.notes && customer.notes.includes('DND:NO_CONTACT')) {
+    // 2. Contact-Permission & Structured Customer Consent Guard (Phase 1C)
+    const consentEval = evaluateCustomerConsent(customer, dto.channel);
+    if (!consentEval.allowed) {
+      if (dto.payload?.persistSuppressed === true) {
+        return this.prisma.notification.create({
+          data: {
+            tenantId,
+            customerId: customer.id,
+            channel: dto.channel,
+            template: dto.template,
+            status: NotifStatus.SUPPRESSED,
+            sentAt: null,
+            deliveredAt: null,
+            payload: {
+              ...(dto.payload ?? {}),
+              customerName: customer.name,
+              suppressionReason: consentEval.reason,
+              consentClassification: consentEval.classification,
+              consentState: consentEval.consentState,
+            },
+          },
+        });
+      }
+
       throw new BadRequestException(
-        'Outreach suppressed: Customer has an active Do-Not-Contact (cease-contact) preference',
+        `Outreach suppressed: ${consentEval.reason}`,
       );
     }
 
@@ -716,7 +739,9 @@ export class NotificationsService {
 
         if (sendResult.status === 'FAILED') {
           status = NotifStatus.FAILED;
+          sentAt = null;
           failReason = sendResult.error || 'Provider rejected email delivery';
+          (fullPayload as any).failReason = failReason;
         } else {
           status = sendResult.status as NotifStatus;
         }
@@ -735,12 +760,45 @@ export class NotificationsService {
         (fullPayload as any).providerMessageId = sendResult.messageId;
         (fullPayload as any).isSimulated = sendResult.isSimulated;
         (fullPayload as any).provider = 'WHATSAPP_CLOUD';
-        status = sendResult.status as NotifStatus;
+        if (sendResult.status === 'FAILED') {
+          status = NotifStatus.FAILED;
+          sentAt = null;
+          failReason = sendResult.error || 'WhatsApp provider rejected delivery';
+          (fullPayload as any).failReason = failReason;
+        } else {
+          status = sendResult.status as NotifStatus;
+        }
+      } else if (dto.channel === NotificationChannel.SMS && this.integrations?.sms) {
+        const smsConfig = await this.integrations.getRawConfig(tenantId, 'SMS_GATEWAY');
+        const sendResult = await this.integrations.sms.send(
+          {
+            to: rendered.recipient,
+            recipientName: customer.name,
+            template: dto.template,
+            message: rendered.message,
+            payload: fullPayload,
+          },
+          smsConfig,
+        );
+        (fullPayload as any).providerMessageId = sendResult.messageId;
+        (fullPayload as any).isSimulated = sendResult.isSimulated;
+        (fullPayload as any).provider = sendResult.provider;
+        if (sendResult.status === 'FAILED') {
+          status = NotifStatus.FAILED;
+          sentAt = null;
+          failReason = sendResult.error || 'SMS provider rejected delivery';
+          (fullPayload as any).failReason = failReason;
+        } else {
+          status = sendResult.status as NotifStatus;
+        }
       } else {
-        // SMS or simulated channel
+        // Channel unsupported or adapter not found
         (fullPayload as any).isSimulated = true;
-        (fullPayload as any).provider = 'SIMULATED';
-        status = NotifStatus.DELIVERED;
+        (fullPayload as any).provider = 'NONE';
+        status = NotifStatus.FAILED;
+        sentAt = null;
+        failReason = `Channel ${dto.channel} is not configured or unsupported`;
+        (fullPayload as any).failReason = failReason;
       }
     }
 
@@ -803,21 +861,11 @@ export class NotificationsService {
       evaluatedInvoices: overdueInvoices.length,
       dispatchedCount: 0,
       failedCount: 0,
+      suppressedCount: 0,
       details: [] as any[],
     };
 
     for (const invoice of overdueInvoices) {
-      // Check customer DND preference before triggering reminder
-      if (invoice.customer.notes && invoice.customer.notes.includes('DND:NO_CONTACT')) {
-        results.details.push({
-          invoiceNumber: invoice.number,
-          customerName: invoice.customer.name,
-          skipped: true,
-          reason: 'Customer has active DND:NO_CONTACT preference',
-        });
-        continue;
-      }
-
       const daysOverdue = Math.max(
         1,
         Math.floor((now.getTime() - new Date(invoice.dueDate).getTime()) / (1000 * 60 * 60 * 24)),
@@ -836,6 +884,22 @@ export class NotificationsService {
         channel = NotificationChannel.EMAIL;
       }
 
+      // Check customer structured consent & DND preferences before triggering reminder (Phase 1C)
+      const consentEval = evaluateCustomerConsent(invoice.customer, channel);
+      if (!consentEval.allowed) {
+        results.suppressedCount++;
+        results.details.push({
+          invoiceNumber: invoice.number,
+          customerName: invoice.customer.name,
+          channel,
+          skipped: true,
+          suppressed: true,
+          status: NotifStatus.SUPPRESSED,
+          reason: consentEval.reason,
+        });
+        continue;
+      }
+
       try {
         const notif = await this.dispatch(user, {
           customerId: invoice.customerId,
@@ -852,6 +916,8 @@ export class NotificationsService {
 
         if (notif.status === NotifStatus.FAILED) {
           results.failedCount++;
+        } else if (notif.status === NotifStatus.SUPPRESSED) {
+          results.suppressedCount++;
         } else {
           results.dispatchedCount++;
         }
@@ -864,12 +930,25 @@ export class NotificationsService {
           daysOverdue,
         });
       } catch (err: any) {
-        results.failedCount++;
-        results.details.push({
-          invoiceNumber: invoice.number,
-          customerName: invoice.customer.name,
-          error: err.message,
-        });
+        if (err.message && err.message.includes('Outreach suppressed')) {
+          results.suppressedCount++;
+          results.details.push({
+            invoiceNumber: invoice.number,
+            customerName: invoice.customer.name,
+            channel,
+            skipped: true,
+            suppressed: true,
+            status: NotifStatus.SUPPRESSED,
+            reason: err.message,
+          });
+        } else {
+          results.failedCount++;
+          results.details.push({
+            invoiceNumber: invoice.number,
+            customerName: invoice.customer.name,
+            error: err.message,
+          });
+        }
       }
     }
 
@@ -882,6 +961,7 @@ export class NotificationsService {
         evaluatedInvoices: results.evaluatedInvoices,
         dispatchedCount: results.dispatchedCount,
         failedCount: results.failedCount,
+        suppressedCount: results.suppressedCount,
       },
     });
 
@@ -900,12 +980,13 @@ export class NotificationsService {
     return result;
   }
 
-  private sanitizeSecretString(str: string): string {
-    if (!str) return str;
+  private sanitizeSecretString(str: any): string {
+    if (typeof str !== 'string') return String(str || '');
     return str
-      .replace(/EAAG[A-Za-z0-9_-]+/g, '[REDACTED_ACCESS_TOKEN]')
+      .replace(/EAA[A-Za-z0-9_-]+/g, '[REDACTED_ACCESS_TOKEN]')
       .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]');
+      .replace(/key-[a-f0-9]{32}/gi, '[REDACTED_KEY]')
+      .replace(/((?:access_token|secret)=)[^\s&,;'"]+/gi, '$1[REDACTED]');
   }
 
   async handleWhatsAppWebhook(payload: any, signature: string) {

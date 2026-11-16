@@ -3,6 +3,23 @@
 .env
 .env.*
 !.env.example
+*.vault*
+*credential*
+.superadmin*
+env.txt
+**/env.txt
+
+# Media uploads and recordings
+uploads/
+**/uploads/
+recordings/
+**/recordings/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
 
 # Node.js
 node_modules/

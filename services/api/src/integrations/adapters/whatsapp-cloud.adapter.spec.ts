@@ -739,9 +739,9 @@ describe('WhatsAppCloudAdapter', () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 5. Mock HTTP Response Dispatch
+  // 5. Mock HTTP Response Dispatch & Error Handling
   // ─────────────────────────────────────────────────────────────────────────────
-  describe('Mocked HTTP Dispatch Behaviors', () => {
+  describe('Mocked HTTP Dispatch Behaviors & Truthful Failure Handling', () => {
     it('returns SENT with live messageId when Meta Cloud API responds with 200 OK', async () => {
       process.env.NODE_ENV = 'development';
       process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
@@ -777,9 +777,95 @@ describe('WhatsAppCloudAdapter', () => {
       expect(result.status).toBe('SENT');
       expect(result.isSimulated).toBe(false);
       expect(result.messageId).toBe('wamid.HBgMOTE5NjE4OTU0NDI5FQIAERgSNUIwNkVDNDM2RjIwNDY4MEZCAA==');
+      expect(result.error).toBeUndefined();
     });
 
-    it('safely handles Meta API 404 (template unapproved) by recording error and falling back to simulation', async () => {
+    it('returns FAILED when Meta API returns HTTP 400 Bad Request', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error: {
+            message: 'Parameter format does not match template schema',
+            type: 'OAuthException',
+            code: 100,
+            fbtrace_id: 'FBT_400_XYZ',
+          },
+        }),
+      } as any);
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-400',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          daysOverdue: 1,
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toBe('Parameter format does not match template schema');
+      expect(result.raw?.httpStatus).toBe(400);
+      expect(result.raw?.errorCode).toBe(100);
+      expect(result.raw?.fbtraceId).toBe('FBT_400_XYZ');
+      expect(result.messageId).toMatch(/^wamid\.failed\./);
+    });
+
+    it('returns FAILED and redacts access tokens when Meta API returns HTTP 401 Unauthorized', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_secret_access_token_abc';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 401,
+        json: async () => ({
+          error: {
+            message: 'Invalid OAuth access token EAAG_secret_access_token_abc - session has expired',
+            type: 'OAuthException',
+            code: 190,
+          },
+        }),
+      } as any);
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-401',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).not.toContain('EAAG_secret_access_token_abc');
+      expect(result.error).toContain('[REDACTED_ACCESS_TOKEN]');
+      expect(result.raw?.httpStatus).toBe(401);
+      expect(result.raw?.errorCode).toBe(190);
+    });
+
+    it('returns FAILED when Meta API returns HTTP 404 (template unapproved)', async () => {
       process.env.NODE_ENV = 'development';
       process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
       process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
@@ -814,9 +900,184 @@ describe('WhatsAppCloudAdapter', () => {
         },
       });
 
-      expect(result.isSimulated).toBe(true);
-      expect(result.raw?.error).toContain('Template name does not exist');
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('Template name does not exist in the translation');
+      expect(result.raw?.httpStatus).toBe(404);
       expect(result.raw?.errorCode).toBe(132001);
+      expect(result.messageId).toMatch(/^wamid\.failed\./);
+    });
+
+    it('returns FAILED when Meta API returns HTTP 429 Too Many Requests (rate limited)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 429,
+        json: async () => ({
+          error: {
+            message: 'Too many calls to this Phone-Number-ID. Wait before retrying.',
+            type: 'OAuthException',
+            code: 80007,
+          },
+        }),
+      } as any);
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-429',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('Too many calls');
+      expect(result.raw?.httpStatus).toBe(429);
+      expect(result.raw?.errorCode).toBe(80007);
+    });
+
+    it('returns FAILED when Meta API returns HTTP 500 Internal Server Error', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => {
+          throw new Error('Not JSON');
+        },
+      } as any);
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-500',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('HTTP 500');
+      expect(result.raw?.httpStatus).toBe(500);
+      expect(result.messageId).toMatch(/^wamid\.failed\./);
+    });
+
+    it('returns FAILED on network connection error (e.g. DNS failure or ECONNREFUSED)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      vi.spyOn(global, 'fetch').mockRejectedValue(new Error('getaddrinfo ENOTFOUND graph.facebook.com'));
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-NET-ERR',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('ENOTFOUND');
+      expect(result.raw?.networkError).toBe(true);
+      expect(result.raw?.isTimeout).toBe(false);
+      expect(result.messageId).toMatch(/^wamid\.err\./);
+    });
+
+    it('returns FAILED on request timeout (AbortError / TimeoutError)', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      const abortError = new Error('The operation was aborted due to timeout');
+      abortError.name = 'TimeoutError';
+      vi.spyOn(global, 'fetch').mockRejectedValue(abortError);
+
+      const result = await adapter.send({
+        to: '919618954429',
+        recipientName: 'Test Recipient',
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        message: 'Invoice overdue notice',
+        payload: {
+          customerName: 'Test Recipient',
+          invoiceNumber: 'INV-LIVE-TIMEOUT',
+          amount: 5000,
+          dueDate: '2026-10-25',
+          companyName: 'myCashflo',
+          companyContactNumber: '+919123456789',
+        },
+      });
+
+      expect(result.status).toBe('FAILED');
+      expect(result.isSimulated).toBe(false);
+      expect(result.error).toContain('timed out');
+      expect(result.raw?.networkError).toBe(true);
+      expect(result.raw?.isTimeout).toBe(true);
+      expect(result.messageId).toMatch(/^wamid\.err\./);
+    });
+
+    it('guarantees that under NO failure scenario is status ever reported as DELIVERED', async () => {
+      process.env.NODE_ENV = 'development';
+      process.env.WHATSAPP_PHONE_NUMBER_ID = '100000000000001';
+      process.env.WHATSAPP_ACCESS_TOKEN = 'EAAG_valid_live_token_123';
+      process.env.WHATSAPP_TEST_RECIPIENT = '919618954429';
+
+      const errorStatusCodes = [400, 401, 403, 404, 429, 500, 502, 503];
+
+      for (const code of errorStatusCodes) {
+        vi.spyOn(global, 'fetch').mockResolvedValueOnce({
+          ok: false,
+          status: code,
+          json: async () => ({ error: { message: `Meta Error HTTP ${code}`, code } }),
+        } as any);
+
+        const res = await adapter.send({
+          to: '919618954429',
+          recipientName: 'Test Recipient',
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          message: 'Notice',
+          payload: {
+            customerName: 'Test Recipient',
+            companyContactNumber: '+919123456789',
+          },
+        });
+
+        expect(res.status).not.toBe('DELIVERED');
+        expect(res.status).toBe('FAILED');
+        expect(res.isSimulated).toBe(false);
+      }
     });
   });
 

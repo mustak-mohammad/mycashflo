@@ -566,6 +566,22 @@ export class PlatformService {
             process.env.RAZORPAY_KEY_SECRET &&
             !isPlaceholder(process.env.RAZORPAY_KEY_SECRET),
         ),
+        mode:
+          !process.env.RAZORPAY_KEY_ID || isPlaceholder(process.env.RAZORPAY_KEY_ID)
+            ? 'unconfigured'
+            : process.env.RAZORPAY_KEY_ID.startsWith('rzp_test_')
+              ? 'test'
+              : 'live',
+        webhookConfigured: Boolean(
+          process.env.RAZORPAY_WEBHOOK_SECRET &&
+            !isPlaceholder(process.env.RAZORPAY_WEBHOOK_SECRET),
+        ),
+        webhookStatus: Boolean(
+          process.env.RAZORPAY_WEBHOOK_SECRET &&
+            !isPlaceholder(process.env.RAZORPAY_WEBHOOK_SECRET),
+        )
+          ? 'CONFIGURED'
+          : 'NOT_CONFIGURED',
       },
       stripe: {
         configured: Boolean(

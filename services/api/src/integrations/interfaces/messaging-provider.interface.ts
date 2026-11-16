@@ -11,6 +11,7 @@ export interface SendMessageOutput {
   provider: string;
   status: 'SENT' | 'DELIVERED' | 'FAILED';
   isSimulated: boolean;
+  error?: string;
   raw?: Record<string, any>;
 }
 

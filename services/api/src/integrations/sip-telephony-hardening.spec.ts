@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { ConsentState } from '@prisma/client';
 import { SipTelephonyAdapter } from './adapters/sip-telephony.adapter.js';
 import { MockSipClient } from './adapters/mock-sip.client.js';
 import { SipRequestBuilder } from './builders/sip-request.builder.js';
@@ -121,6 +122,7 @@ describe('Safe Dry-Run SIP Integration Hardening Tests (10 Proofs)', () => {
       phone: '+919876543210',
       notes: null,
       preferredChannel: null,
+      voiceConsent: ConsentState.OPTED_IN,
     };
 
     let callSessions: any[] = overrides?.existingCalls ?? [];

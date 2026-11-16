@@ -2,11 +2,13 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useNavigate, useLocation } from 'react-router-dom'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAuth } from '../store/AuthContext'
 import apiClient from '../api/client'
 import type { LoginResponse } from '../types'
 import { PasswordInput } from '../components/ui/PasswordInput'
+import type { DevDemoAccount } from '../utils/devDemoAccounts'
+import { clearPostLoginRedirect, getPostLoginRedirect } from '../utils/authStorage'
 
 const schema = z.object({
   email: z.string().email('Enter a valid email'),
@@ -18,10 +20,33 @@ export default function LoginPage() {
   const { login } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
-  const requestedFrom = (location.state as { from?: { pathname: string } })?.from?.pathname
+  const requestedFrom =
+    (location.state as { from?: { pathname: string } })?.from?.pathname ??
+    getPostLoginRedirect() ??
+    undefined
   const [serverError, setServerError] = useState<string | null>(null)
   const [googleLoading, setGoogleLoading] = useState<boolean>(false)
-  const [isSignUp, setIsSignUp] = useState<boolean>(false)
+  const [showRegistrationNotice, setShowRegistrationNotice] = useState<boolean>(false)
+  const [demoAccounts, setDemoAccounts] = useState<DevDemoAccount[]>([])
+
+  useEffect(() => {
+    if (!(import.meta.env.DEV && !import.meta.env.PROD)) {
+      return
+    }
+    let active = true
+    import('../utils/devDemoAccounts')
+      .then((mod) => {
+        if (active) {
+          setDemoAccounts(mod.DEV_DEMO_ACCOUNTS)
+        }
+      })
+      .catch(() => {
+        if (active) setDemoAccounts([])
+      })
+    return () => {
+      active = false
+    }
+  }, [])
 
   const {
     register,
@@ -41,6 +66,7 @@ export default function LoginPage() {
     setServerError(null)
     try {
       const res = await apiClient.post<LoginResponse>('/auth/login', data)
+      clearPostLoginRedirect()
       login(res.data.user, res.data.tokens.accessToken, res.data.tokens.refreshToken)
       navigate(getRedirectDestination(res.data.user.role), { replace: true })
     } catch (err: unknown) {
@@ -67,8 +93,36 @@ export default function LoginPage() {
         email,
         name,
       })
+      clearPostLoginRedirect()
       login(res.data.user, res.data.tokens.accessToken, res.data.tokens.refreshToken)
       navigate(getRedirectDestination(res.data.user.role), { replace: true })
+    }
+
+    const tryDevMockFallback = (finish?: (fn: () => void) => void, resolve?: () => void, reject?: (e: unknown) => void) => {
+      if (!(import.meta.env.DEV && !import.meta.env.PROD && import.meta.env.VITE_ALLOW_DEV_MOCK_AUTH === 'true')) {
+        const err = new Error(
+          'Google Sign-In is not configured for this environment. Please sign in with your work email and password.',
+        )
+        if (finish && reject) {
+          finish(() => reject(err))
+          return
+        }
+        throw err
+      }
+
+      const executeMockAuth = () =>
+        import('../utils/devDemoAccounts').then((mod) => {
+          const payload = mod.createDevMockGooglePayload()
+          return authenticateWithToken(payload.idToken, payload.email, payload.name)
+        })
+
+      if (finish && resolve && reject) {
+        executeMockAuth()
+          .then(() => finish(resolve))
+          .catch((e) => finish(() => reject(e)))
+        return
+      }
+      return executeMockAuth()
     }
 
     try {
@@ -104,34 +158,15 @@ export default function LoginPage() {
 
             googleAccountsId.prompt((notification: any) => {
               if (notification?.isNotDisplayed?.() || notification?.isSkippedMoment?.()) {
-                const payload = {
-                  idToken: `mock_google_token_${Date.now()}`,
-                  email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
-                  name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
-                }
-                authenticateWithToken(payload.idToken, payload.email, payload.name)
-                  .then(() => finish(resolve))
-                  .catch((e) => finish(() => reject(e)))
+                tryDevMockFallback(finish, resolve, reject)
               }
             })
           } catch {
-            const payload = {
-              idToken: `mock_google_token_${Date.now()}`,
-              email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
-              name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
-            }
-            authenticateWithToken(payload.idToken, payload.email, payload.name)
-              .then(() => finish(resolve))
-              .catch((e) => finish(() => reject(e)))
+            tryDevMockFallback(finish, resolve, reject)
           }
         })
       } else {
-        const payload = {
-          idToken: `mock_google_token_${Date.now()}`,
-          email: isSignUp ? `founder.${Date.now().toString(36)}@democorp.in` : 'admin@democorp.in',
-          name: isSignUp ? 'New Workspace Founder' : 'Priya Sharma (Google)',
-        }
-        await authenticateWithToken(payload.idToken, payload.email, payload.name)
+        await tryDevMockFallback()
       }
     } catch (err: unknown) {
       const msg =
@@ -199,16 +234,12 @@ export default function LoginPage() {
             </div>
           </div>
 
-          <h2 className="text-2xl font-bold text-white mb-1">
-            {isSignUp ? 'Create your workspace' : 'Welcome back'}
-          </h2>
+          <h2 className="text-2xl font-bold text-white mb-1">Welcome back</h2>
           <p className="text-sm mb-6" style={{ color: 'var(--text-muted)' }}>
-            {isSignUp
-              ? 'Get started with myCashflo for your team'
-              : 'Sign in to access your receivables dashboard'}
+            Sign in to access your receivables dashboard
           </p>
 
-          {/* Google Sign In / Sign Up Button */}
+          {/* Google Sign In Button */}
           <button
             type="button"
             onClick={handleGoogleAuth}
@@ -225,13 +256,7 @@ export default function LoginPage() {
               <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
             </svg>
-            <span>
-              {googleLoading
-                ? 'Connecting with Google…'
-                : isSignUp
-                ? 'Sign up with Google'
-                : 'Continue with Google'}
-            </span>
+            <span>{googleLoading ? 'Connecting with Google…' : 'Continue with Google'}</span>
           </button>
 
           {/* Divider */}
@@ -319,63 +344,65 @@ export default function LoginPage() {
               className="w-full py-3 rounded-lg text-white font-medium text-sm transition-all duration-150 cursor-pointer disabled:opacity-60"
               style={{ background: 'var(--primary)' }}
             >
-              {isSubmitting
-                ? 'Processing…'
-                : isSignUp
-                ? 'Create Workspace Account'
-                : 'Sign in to Workspace'}
+              {isSubmitting ? 'Signing in…' : 'Sign in to Workspace'}
             </button>
           </form>
 
-          {/* Quick Demo Switcher */}
-          {!isSignUp && (
+          {/* Quick Demo Switcher (strictly stripped from production builds) */}
+          {import.meta.env.DEV && !import.meta.env.PROD && demoAccounts.length > 0 && (
             <div className="mt-5 p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
               <div className="text-slate-400 font-medium mb-2 flex items-center justify-between">
-                <span>Quick Demo Accounts (1-Click Fill):</span>
+                <span>Quick Demo Accounts (Dev Only):</span>
                 <span className="text-[10px] text-slate-500">Includes seeded demo data</span>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setValue('email', 'admin@democorp.in')
-                    setValue('password', 'Admin@1234')
-                  }}
-                  className="p-2 rounded-lg bg-indigo-950/60 border border-indigo-800/60 text-indigo-200 hover:bg-indigo-900/80 text-left transition-colors cursor-pointer"
-                >
-                  <div className="font-semibold text-white">Priya Sharma</div>
-                  <div className="text-[10px] text-indigo-300">Admin · Demo Corp</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setValue('email', 'agent@democorp.in')
-                    setValue('password', 'Agent@1234')
-                  }}
-                  className="p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 text-left transition-colors cursor-pointer"
-                >
-                  <div className="font-semibold text-white">Rahul Verma</div>
-                  <div className="text-[10px] text-slate-400">Agent · Demo Corp</div>
-                </button>
+                {demoAccounts.map((acc) => (
+                  <button
+                    key={acc.email}
+                    type="button"
+                    onClick={() => {
+                      setValue('email', acc.email)
+                      setValue('password', acc.password)
+                    }}
+                    className={
+                      acc.variant === 'primary'
+                        ? 'p-2 rounded-lg bg-indigo-950/60 border border-indigo-800/60 text-indigo-200 hover:bg-indigo-900/80 text-left transition-colors cursor-pointer'
+                        : 'p-2 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 hover:bg-slate-700 text-left transition-colors cursor-pointer'
+                    }
+                  >
+                    <div className="font-semibold text-white">{acc.label}</div>
+                    <div
+                      className={`text-[10px] ${acc.variant === 'primary' ? 'text-indigo-300' : 'text-slate-400'}`}
+                    >
+                      {acc.roleSubtitle}
+                    </div>
+                  </button>
+                ))}
               </div>
             </div>
           )}
 
-          {/* Toggle between Sign In and Sign Up */}
+          {/* Account access / registration notice */}
           <div className="mt-6 text-center text-xs">
-            <span style={{ color: 'var(--text-muted)' }}>
-              {isSignUp ? 'Already have an account?' : "Don't have an account yet?"}{' '}
-            </span>
+            <span style={{ color: 'var(--text-muted)' }}>Don&apos;t have an account yet? </span>
             <button
               type="button"
-              onClick={() => {
-                setIsSignUp(!isSignUp)
-                setServerError(null)
-              }}
+              onClick={() => setShowRegistrationNotice((prev) => !prev)}
+              aria-expanded={showRegistrationNotice}
               className="text-indigo-400 font-semibold hover:underline cursor-pointer"
             >
-              {isSignUp ? 'Sign in' : 'Sign up'}
+              Request access
             </button>
+            {showRegistrationNotice && (
+              <div
+                role="note"
+                className="mt-3 rounded-lg px-3 py-2.5 text-left text-xs text-slate-300 bg-slate-900/70 border border-slate-800"
+              >
+                Self-service email/password registration is not supported. Contact your workspace
+                administrator for an invitation, or use <strong>Continue with Google</strong> if
+                enabled for your organization.
+              </div>
+            )}
           </div>
 
           <p className="mt-8 text-xs text-center" style={{ color: 'var(--text-muted)' }}>

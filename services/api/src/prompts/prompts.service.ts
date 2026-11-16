@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service.js';
 import { AuditLogsService } from '../audit-logs/audit-logs.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsOptional, IsString, IsBoolean } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class PromptQueryDto {
@@ -18,6 +19,7 @@ export class PromptQueryDto {
 
   @ApiPropertyOptional({ description: 'Filter active status' })
   @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true || value === 1 || value === '1')
   @IsBoolean()
   isActive?: boolean;
 }
