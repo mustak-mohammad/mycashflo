@@ -97,6 +97,17 @@ describe('CallsService - Recording Management and Playback Tests', () => {
       customer: {
         findFirst: vi.fn().mockResolvedValue({ id: 'cust_001', name: 'Acme Logistics' }),
       },
+      collectionCase: {
+        findFirst: vi.fn().mockImplementation(async ({ where }) => {
+          if (where.tenantId === 'tenant_rec_test' && where.id === 'case_001') {
+            return { id: 'case_001', customerId: 'cust_001', tenantId: 'tenant_rec_test' };
+          }
+          if (where.tenantId === 'tenant_rec_test' && where.id === 'case_cust_other') {
+            return { id: 'case_cust_other', customerId: 'cust_other_user', tenantId: 'tenant_rec_test' };
+          }
+          return null;
+        }),
+      },
       tenant: {
         findUnique: vi.fn().mockResolvedValue({ id: 'tenant_rec_test', name: 'Test Tenant Ltd' }),
       },
@@ -435,6 +446,71 @@ describe('CallsService - Recording Management and Playback Tests', () => {
       await expect(
         callsService.updateOutcome('call_other_tenant', mockUser, {
           outcome: 'DISPUTE',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('Tenant Isolation & Referential Integrity for Calls', () => {
+    it('succeeds creating a call session when collection case and customer belong to tenant and match', async () => {
+      const res = await callsService.create(mockUser, {
+        customerId: 'cust_001',
+        collectionCaseId: 'case_001',
+        outcome: 'INFORMATIONAL' as any,
+      });
+
+      expect(res.id).toBeDefined();
+      expect(res.customerId).toBe('cust_001');
+      expect(res.collectionCaseId).toBe('case_001');
+    });
+
+    it('fails creating a call session when collection case belongs to another customer', async () => {
+      await expect(
+        callsService.create(mockUser, {
+          customerId: 'cust_001',
+          collectionCaseId: 'case_cust_other',
+          outcome: 'INFORMATIONAL' as any,
+        }),
+      ).rejects.toThrow('Collection case does not belong to the specified customer');
+    });
+
+    it('fails creating a call session when collection case belongs to another tenant', async () => {
+      await expect(
+        callsService.create(mockUser, {
+          customerId: 'cust_001',
+          collectionCaseId: 'case_foreign_tenant',
+          outcome: 'INFORMATIONAL' as any,
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('fails creating a call session when customer belongs to another tenant', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValueOnce(null);
+
+      await expect(
+        callsService.create(mockUser, {
+          customerId: 'cust_foreign_tenant',
+          outcome: 'INFORMATIONAL' as any,
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('fails initiateOutboundCall when collection case belongs to another customer', async () => {
+      await expect(
+        callsService.initiateOutboundCall(mockUser, {
+          customerId: 'cust_001',
+          collectionCaseId: 'case_cust_other',
+          phone: '+91 98765 43210',
+        }),
+      ).rejects.toThrow('Collection case does not belong to the target customer');
+    });
+
+    it('fails initiateOutboundCall when collection case belongs to another tenant', async () => {
+      await expect(
+        callsService.initiateOutboundCall(mockUser, {
+          customerId: 'cust_001',
+          collectionCaseId: 'case_foreign_tenant',
+          phone: '+91 98765 43210',
         }),
       ).rejects.toThrow(NotFoundException);
     });

@@ -59,7 +59,19 @@ describe('NotificationsService', () => {
       },
       invoice: {
         findMany: vi.fn(),
-        findFirst: vi.fn(),
+        findFirst: vi.fn().mockImplementation(async (args?: any) => {
+          if (args?.where?.id === 'inv_101') {
+            return {
+              id: 'inv_101',
+              number: 'INV-2024-999',
+              outstanding: 125000,
+              dueDate: new Date('2024-11-30'),
+              customerId: 'cust_1',
+              tenantId: 'tenant_1',
+            };
+          }
+          return null;
+        }),
       },
       payment: {
         findFirst: vi.fn(),
@@ -348,6 +360,7 @@ describe('NotificationsService', () => {
         outstanding: 125000,
         dueDate: new Date('2024-11-30'),
         tenantId: 'tenant_1',
+        customerId: 'cust_1',
       });
 
       mockPrisma.payment.findFirst.mockResolvedValue({
@@ -1712,6 +1725,197 @@ describe('NotificationsService', () => {
       expect(res.details[0].status).toBe(NotifStatus.SUPPRESSED);
       expect(res.details[0].reason).toContain('consent state: UNKNOWN');
       expect(mockIntegrations.whatsapp.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Tenant Isolation & Referential Integrity Remediation (SEC-TENANT-001)', () => {
+    it('Scenario 1: Notification dispatch succeeds when customer and invoice belong to the tenant and each other', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_valid_01' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_valid_01',
+        number: 'INV-VALID-01',
+        outstanding: 50000,
+        dueDate: new Date('2026-12-31'),
+        customerId: 'cust_valid_01',
+        tenantId: 'tenant_1',
+      });
+      mockPrisma.notification.create.mockImplementation(({ data }: any) =>
+        Promise.resolve({ id: 'notif_sec_01', ...data }),
+      );
+
+      const result = await service.dispatch(mockUser, {
+        customerId: 'cust_valid_01',
+        channel: NotificationChannel.EMAIL,
+        template: 'PAYMENT_REMINDER_OVERDUE',
+        payload: {
+          invoiceId: 'inv_valid_01',
+          invoiceNumber: 'INV-VALID-01',
+          amount: 50000,
+        },
+      });
+
+      expect(result.id).toBe('notif_sec_01');
+      expect(result.payload.invoiceNumber).toBe('INV-VALID-01');
+      expect(result.payload.amount).toBe(50000);
+      expect(mockIntegrations.email.send).toHaveBeenCalled();
+    });
+
+    it('Scenario 2: Notification dispatch fails when invoice belongs to another customer in the same tenant', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_attacker' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_victim',
+        number: 'INV-VICTIM-99',
+        outstanding: 999999,
+        dueDate: new Date('2026-12-31'),
+        customerId: 'cust_victim',
+        tenantId: 'tenant_1',
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_attacker',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_victim',
+          },
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('Scenario 3: Notification dispatch fails when invoice belongs to another tenant', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_valid_01' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      // Invoice findFirst returns null because tenantId query does not match foreign tenant invoice
+      mockPrisma.invoice.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_valid_01',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_foreign_tenant',
+          },
+        }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('Scenario 4: Notification dispatch fails when customer belongs to another tenant', async () => {
+      // Customer findFirst returns null because customer does not exist in user.tenantId
+      mockPrisma.customer.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_foreign_tenant',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_valid_01',
+          },
+        }),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockPrisma.invoice.findFirst).not.toHaveBeenCalled();
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+    });
+
+    it('Scenario 5: Notification dispatch fails when invoice number in payload contradicts the referenced invoice', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_valid_01' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_valid_01',
+        number: 'INV-REAL-123',
+        outstanding: 50000,
+        dueDate: new Date('2026-12-31'),
+        customerId: 'cust_valid_01',
+        tenantId: 'tenant_1',
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_valid_01',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_valid_01',
+            invoiceNumber: 'INV-CONTRADICTING-999',
+          },
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('Scenario 5b: Notification dispatch fails when amount in payload contradicts referenced invoice outstanding balance', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_valid_01' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_valid_01',
+        number: 'INV-REAL-123',
+        outstanding: 50000,
+        dueDate: new Date('2026-12-31'),
+        customerId: 'cust_valid_01',
+        tenantId: 'tenant_1',
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_valid_01',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_valid_01',
+            amount: 999999, // Mismatch
+          },
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('Scenario 5c: Notification dispatch fails when payment link belongs to another customer', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue(optedInCustomer({ id: 'cust_valid_01' }));
+      mockPrisma.tenant.findUnique.mockResolvedValue({ id: 'tenant_1', name: 'Demo Corp Pvt Ltd' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_valid_01',
+        number: 'INV-REAL-123',
+        outstanding: 50000,
+        dueDate: new Date('2026-12-31'),
+        customerId: 'cust_valid_01',
+        tenantId: 'tenant_1',
+      });
+      mockPrisma.payment.findFirst.mockResolvedValue({
+        id: 'pay_other',
+        customerId: 'cust_other_victim',
+        invoiceId: 'inv_other',
+        notes: 'https://rzp.io/i/victim_link',
+      });
+
+      await expect(
+        service.dispatch(mockUser, {
+          customerId: 'cust_valid_01',
+          channel: NotificationChannel.EMAIL,
+          template: 'PAYMENT_REMINDER_OVERDUE',
+          payload: {
+            invoiceId: 'inv_valid_01',
+            paymentLink: 'https://rzp.io/i/victim_link',
+          },
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockIntegrations.email.send).not.toHaveBeenCalled();
+      expect(mockPrisma.notification.create).not.toHaveBeenCalled();
     });
   });
 });

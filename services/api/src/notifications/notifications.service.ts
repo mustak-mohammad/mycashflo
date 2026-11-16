@@ -515,7 +515,128 @@ export class NotificationsService {
       }
     }
 
-    // 2. Contact-Permission & Structured Customer Consent Guard (Phase 1C)
+    // 2. Strict Referential Integrity: Validate Invoice, Customer, and Payment Link Relationships Upfront
+    let verifiedInvoiceNumber = dto.payload?.invoiceNumber;
+    let verifiedAmount = dto.payload?.amount;
+    let verifiedDueDate = dto.payload?.dueDate;
+    let approvedPaymentUrl = dto.payload?.paymentLink;
+    let resolvedInvoice: any = null;
+
+    if (dto.payload?.invoiceId) {
+      resolvedInvoice = await this.prisma.invoice.findFirst({
+        where: { id: dto.payload.invoiceId, tenantId },
+      });
+      if (!resolvedInvoice) {
+        throw new NotFoundException('Invoice not found in tenant');
+      }
+
+      // Enforce invoice-customer ownership
+      if (resolvedInvoice.customerId && resolvedInvoice.customerId !== customer.id) {
+        throw new BadRequestException('Referenced invoice does not belong to the target customer');
+      }
+
+      // Enforce invoiceNumber consistency if explicitly provided in payload
+      if (
+        dto.payload?.invoiceNumber &&
+        dto.payload.invoiceNumber.trim().toUpperCase() !== resolvedInvoice.number.trim().toUpperCase()
+      ) {
+        throw new BadRequestException('Invoice number does not match the referenced invoice ID');
+      }
+
+      // Enforce amount consistency if explicitly provided in payload
+      if (
+        dto.payload?.amount !== undefined &&
+        dto.payload?.amount !== null &&
+        Math.abs(Number(dto.payload.amount) - Number(resolvedInvoice.outstanding)) > 0.009
+      ) {
+        throw new BadRequestException('Amount in payload does not match the referenced invoice outstanding balance');
+      }
+
+      verifiedInvoiceNumber = resolvedInvoice.number;
+      verifiedAmount = Number(resolvedInvoice.outstanding);
+      verifiedDueDate = resolvedInvoice.dueDate;
+
+      // Look up existing approved payment link strictly bound to customer and invoice
+      if (!approvedPaymentUrl) {
+        const existingLinkPayment = await this.prisma.payment.findFirst({
+          where: {
+            tenantId,
+            invoiceId: resolvedInvoice.id,
+            customerId: customer.id,
+            method: PaymentMethod.PAYMENT_LINK,
+            status: PaymentStatus.PENDING,
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+        if (existingLinkPayment?.notes && existingLinkPayment.notes.startsWith('http')) {
+          approvedPaymentUrl = existingLinkPayment.notes;
+        }
+      }
+    } else if (dto.payload?.invoiceNumber) {
+      // If invoiceNumber provided without invoiceId, check if it matches an existing invoice in tenant
+      const invByNumber = await this.prisma.invoice.findFirst({
+        where: { number: dto.payload.invoiceNumber.trim(), tenantId },
+      });
+      if (invByNumber) {
+        if (invByNumber.customerId && invByNumber.customerId !== customer.id) {
+          throw new BadRequestException('Referenced invoice number does not belong to the target customer');
+        }
+        if (
+          dto.payload?.amount !== undefined &&
+          dto.payload?.amount !== null &&
+          Math.abs(Number(dto.payload.amount) - Number(invByNumber.outstanding)) > 0.009
+        ) {
+          throw new BadRequestException('Amount in payload does not match the referenced invoice outstanding balance');
+        }
+        resolvedInvoice = invByNumber;
+        verifiedInvoiceNumber = invByNumber.number;
+        if (verifiedAmount === undefined || verifiedAmount === null) {
+          verifiedAmount = Number(invByNumber.outstanding);
+        }
+        if (!verifiedDueDate) {
+          verifiedDueDate = invByNumber.dueDate;
+        }
+
+        if (!approvedPaymentUrl) {
+          const existingLinkPayment = await this.prisma.payment.findFirst({
+            where: {
+              tenantId,
+              invoiceId: invByNumber.id,
+              customerId: customer.id,
+              method: PaymentMethod.PAYMENT_LINK,
+              status: PaymentStatus.PENDING,
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+          if (existingLinkPayment?.notes && existingLinkPayment.notes.startsWith('http')) {
+            approvedPaymentUrl = existingLinkPayment.notes;
+          }
+        }
+      }
+    }
+
+    // Strict validation of caller-supplied payment link
+    if (approvedPaymentUrl) {
+      const linkPayment = await this.prisma.payment.findFirst({
+        where: {
+          tenantId,
+          OR: [
+            { notes: approvedPaymentUrl },
+            { providerRef: approvedPaymentUrl },
+          ],
+        },
+      });
+      if (linkPayment) {
+        if (linkPayment.customerId && linkPayment.customerId !== customer.id) {
+          throw new BadRequestException('Payment link does not belong to the target customer');
+        }
+        if (resolvedInvoice && linkPayment.invoiceId && linkPayment.invoiceId !== resolvedInvoice.id) {
+          throw new BadRequestException('Payment link does not match the referenced invoice');
+        }
+      }
+    }
+
+    // 3. Contact-Permission & Structured Customer Consent Guard (Phase 1C)
     const consentEval = evaluateCustomerConsent(customer, dto.channel);
     if (!consentEval.allowed) {
       if (dto.payload?.persistSuppressed === true) {
@@ -576,40 +697,6 @@ export class NotificationsService {
       });
       if (recentDuplicate) {
         return recentDuplicate;
-      }
-    }
-
-    // 4. Verified Invoice & Approved Payment Link Lookup (Strict: Never mutate payments or invent links)
-    let verifiedInvoiceNumber = dto.payload?.invoiceNumber;
-    let verifiedAmount = dto.payload?.amount;
-    let verifiedDueDate = dto.payload?.dueDate;
-    let approvedPaymentUrl = dto.payload?.paymentLink;
-
-    if (dto.payload?.invoiceId) {
-      const invoice = await this.prisma.invoice.findFirst({
-        where: { id: dto.payload.invoiceId, tenantId },
-      });
-      if (!invoice) {
-        throw new NotFoundException('Invoice not found in tenant');
-      }
-      verifiedInvoiceNumber = invoice.number;
-      verifiedAmount = Number(invoice.outstanding);
-      verifiedDueDate = invoice.dueDate;
-
-      // Look up existing approved payment link without creating any new payment records
-      if (!approvedPaymentUrl) {
-        const existingLinkPayment = await this.prisma.payment.findFirst({
-          where: {
-            tenantId,
-            invoiceId: invoice.id,
-            method: PaymentMethod.PAYMENT_LINK,
-            status: PaymentStatus.PENDING,
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-        if (existingLinkPayment?.notes && existingLinkPayment.notes.startsWith('http')) {
-          approvedPaymentUrl = existingLinkPayment.notes;
-        }
       }
     }
 

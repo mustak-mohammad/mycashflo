@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 import { IsOptional, IsEnum, IsString, IsBoolean, IsDateString, IsNumber } from 'class-validator';
@@ -152,8 +152,20 @@ export class FollowUpsService {
       this.prisma.followUpTask.count({ where: { ...summaryWhere, done: true } }),
     ]);
 
+    // Defense-in-depth: Ensure eager-loaded relations cannot leak cross-tenant data
+    const sanitizedData = data.map((t) => {
+      if (
+        t.collectionCase &&
+        (t.collectionCase as any).tenantId &&
+        (t.collectionCase as any).tenantId !== tenantId
+      ) {
+        return { ...t, collectionCase: null, collectionCaseId: null };
+      }
+      return t;
+    });
+
     return {
-      data,
+      data: sanitizedData,
       total,
       page,
       limit,
@@ -184,11 +196,72 @@ export class FollowUpsService {
       throw new ForbiddenException('Access denied: You are not assigned to this follow-up task');
     }
 
+    // Defense-in-depth: Ensure eager-loaded relations cannot leak cross-tenant data
+    if (
+      task.collectionCase &&
+      (task.collectionCase as any).tenantId &&
+      (task.collectionCase as any).tenantId !== user.tenantId
+    ) {
+      task.collectionCase = null as any;
+      task.collectionCaseId = null as any;
+    }
+
     return task;
   }
 
   async create(user: AuthUser, dto: CreateFollowUpDto) {
-    const assignedTo = user.role === 'AGENT' ? user.userId : (dto.assignedTo ?? user.userId);
+    const { tenantId, userId, role } = user;
+
+    let effectiveCustomerId = dto.customerId;
+    let colCase: any = null;
+
+    if (dto.collectionCaseId) {
+      colCase = await this.prisma.collectionCase.findFirst({
+        where: { id: dto.collectionCaseId, tenantId },
+      });
+      if (!colCase) {
+        throw new NotFoundException('Collection case not found in current tenant');
+      }
+
+      if (dto.customerId) {
+        const customer = await this.prisma.customer.findFirst({
+          where: { id: dto.customerId, tenantId },
+        });
+        if (!customer) {
+          throw new NotFoundException('Customer not found in current tenant');
+        }
+        if (colCase.customerId !== customer.id) {
+          throw new BadRequestException('Collection case does not belong to the specified customer');
+        }
+      } else {
+        effectiveCustomerId = colCase.customerId;
+      }
+
+      if (role === 'AGENT' && colCase.assignedTo && colCase.assignedTo !== userId) {
+        throw new ForbiddenException('Access denied: You are not assigned to this collection case');
+      }
+    } else if (dto.customerId) {
+      const customer = await this.prisma.customer.findFirst({
+        where: { id: dto.customerId, tenantId },
+      });
+      if (!customer) {
+        throw new NotFoundException('Customer not found in current tenant');
+      }
+      effectiveCustomerId = customer.id;
+    }
+
+    let assignedTo = userId;
+    if (role === 'AGENT') {
+      assignedTo = userId;
+    } else if (dto.assignedTo) {
+      const assignee = await this.prisma.user.findFirst({
+        where: { id: dto.assignedTo, tenantId, isActive: true },
+      });
+      if (!assignee) {
+        throw new BadRequestException('Assigned user not found in current tenant or is inactive');
+      }
+      assignedTo = assignee.id;
+    }
 
     return this.prisma.followUpTask.create({
       data: {
@@ -196,13 +269,13 @@ export class FollowUpsService {
         description: dto.description,
         dueDate: new Date(dto.dueDate),
         priority: dto.priority ?? CasePriority.MEDIUM,
-        collectionCaseId: dto.collectionCaseId,
-        customerId: dto.customerId,
+        collectionCaseId: dto.collectionCaseId ? colCase.id : undefined,
+        customerId: effectiveCustomerId,
         assignedTo,
-        tenantId: user.tenantId,
+        tenantId,
       },
       include: {
-        assignedAgent: { select: { id: true, name: true } },
+        assignedAgent: { select: { id: true, name: true, email: true } },
         collectionCase: {
           include: {
             customer: { select: { id: true, name: true } },
@@ -215,8 +288,20 @@ export class FollowUpsService {
   async update(id: string, user: AuthUser, dto: UpdateFollowUpDto) {
     const task = await this.findOne(id, user);
 
-    if (user.role === 'AGENT' && dto.assignedTo && dto.assignedTo !== user.userId) {
-      throw new ForbiddenException('Agents are not authorized to reassign tasks to other users');
+    let assignedTo = task.assignedTo;
+    if (dto.assignedTo !== undefined && dto.assignedTo !== task.assignedTo) {
+      if (user.role === 'AGENT' && dto.assignedTo !== user.userId) {
+        throw new ForbiddenException('Agents are not authorized to reassign tasks to other users');
+      }
+      if (user.role !== 'AGENT' && dto.assignedTo) {
+        const assignee = await this.prisma.user.findFirst({
+          where: { id: dto.assignedTo, tenantId: user.tenantId, isActive: true },
+        });
+        if (!assignee) {
+          throw new BadRequestException('Assigned user not found in current tenant or is inactive');
+        }
+        assignedTo = assignee.id;
+      }
     }
 
     return this.prisma.followUpTask.update({
@@ -226,7 +311,7 @@ export class FollowUpsService {
         ...(dto.description !== undefined ? { description: dto.description } : {}),
         ...(dto.dueDate !== undefined ? { dueDate: new Date(dto.dueDate) } : {}),
         ...(dto.priority !== undefined ? { priority: dto.priority } : {}),
-        ...(dto.assignedTo !== undefined ? { assignedTo: dto.assignedTo } : {}),
+        ...(dto.assignedTo !== undefined ? { assignedTo } : {}),
         ...(dto.done !== undefined
           ? {
               done: dto.done,
@@ -235,7 +320,7 @@ export class FollowUpsService {
           : {}),
       },
       include: {
-        assignedAgent: { select: { id: true, name: true } },
+        assignedAgent: { select: { id: true, name: true, email: true } },
         collectionCase: {
           include: {
             customer: { select: { id: true, name: true } },

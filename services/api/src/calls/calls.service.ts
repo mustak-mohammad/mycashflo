@@ -329,9 +329,30 @@ export class CallsService {
   }
 
   async create(user: AuthUser, dto: CreateCallDto) {
+    const { tenantId } = user;
+    let effectiveCustomerId = dto.customerId;
+
+    if (dto.collectionCaseId) {
+      const colCase = await this.prisma.collectionCase.findFirst({
+        where: { id: dto.collectionCaseId, tenantId },
+      });
+      if (!colCase) throw new NotFoundException('Collection case not found in tenant');
+      if (dto.customerId && colCase.customerId !== dto.customerId) {
+        throw new BadRequestException('Collection case does not belong to the specified customer');
+      }
+      effectiveCustomerId = effectiveCustomerId || colCase.customerId;
+    }
+
+    if (effectiveCustomerId) {
+      const customer = await this.prisma.customer.findFirst({
+        where: { id: effectiveCustomerId, tenantId },
+      });
+      if (!customer) throw new NotFoundException('Customer not found in tenant');
+    }
+
     return this.prisma.callSession.create({
       data: {
-        customerId: dto.customerId,
+        customerId: effectiveCustomerId,
         collectionCaseId: dto.collectionCaseId,
         userId: user.userId,
         livekitRoom: dto.livekitRoom,
@@ -554,6 +575,19 @@ export class CallsService {
 
     if (!customer) {
       throw new NotFoundException('Customer not found in tenant');
+    }
+
+    // 1b. Validate collectionCaseId if provided
+    if (dto.collectionCaseId) {
+      const colCase = await this.prisma.collectionCase.findFirst({
+        where: { id: dto.collectionCaseId, tenantId },
+      });
+      if (!colCase) {
+        throw new NotFoundException('Collection case not found in tenant');
+      }
+      if (colCase.customerId !== customer.id) {
+        throw new BadRequestException('Collection case does not belong to the target customer');
+      }
     }
 
     // 2. Strict DND / Opt-Out Enforcement & Centralized Consent Policy (Phase 1C.1)

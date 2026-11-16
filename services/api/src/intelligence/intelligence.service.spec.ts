@@ -546,5 +546,72 @@ describe('IntelligenceService', () => {
         }),
       ).rejects.toThrow(BadRequestException);
     });
+
+    it('rejects recording Promise-to-Pay when invoice belongs to another customer', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_attacker', name: 'Attacker' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_victim',
+        number: 'INV-VICTIM-001',
+        customerId: 'cust_victim',
+        status: InvoiceStatus.OVERDUE,
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'record_payment_promise',
+          parameters: {
+            customerId: 'cust_attacker',
+            invoiceId: 'inv_victim',
+            promisedAmount: 50000,
+            promisedDate: '2026-10-25T00:00:00Z',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow('Referenced invoice does not belong to the specified customer');
+    });
+
+    it('rejects disputing invoice when invoice belongs to another customer', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_attacker', name: 'Attacker' });
+      mockPrisma.invoice.findFirst.mockResolvedValue({
+        id: 'inv_victim',
+        number: 'INV-VICTIM-001',
+        customerId: 'cust_victim',
+        status: InvoiceStatus.OVERDUE,
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'dispute_invoice',
+          parameters: {
+            customerId: 'cust_attacker',
+            invoiceId: 'inv_victim',
+            reason: 'Invalid charges',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow('Referenced invoice does not belong to the specified customer');
+    });
+
+    it('rejects create_follow_up_task when collection case belongs to another customer', async () => {
+      mockPrisma.customer.findFirst.mockResolvedValue({ id: 'cust_attacker', name: 'Attacker' });
+      mockPrisma.collectionCase.findFirst.mockResolvedValue({
+        id: 'case_victim',
+        customerId: 'cust_victim',
+        tenantId: 'tenant_1',
+      });
+
+      await expect(
+        service.executeTool(mockUser, {
+          toolName: 'create_follow_up_task',
+          parameters: {
+            customerId: 'cust_attacker',
+            collectionCaseId: 'case_victim',
+            title: 'Unauthorized follow-up',
+            dueDate: '2026-10-25T00:00:00Z',
+          },
+          confirmed: true,
+        }),
+      ).rejects.toThrow('Collection case does not belong to the specified customer');
+    });
   });
 });

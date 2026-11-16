@@ -496,6 +496,16 @@ export class IntelligenceService {
     });
     if (!customer) throw new NotFoundException('Customer not found');
 
+    if (params.collectionCaseId) {
+      const colCase = await this.prisma.collectionCase.findFirst({
+        where: { id: params.collectionCaseId, tenantId },
+      });
+      if (!colCase) throw new NotFoundException('Collection case not found in tenant');
+      if (colCase.customerId !== customer.id) {
+        throw new BadRequestException('Collection case does not belong to the specified customer');
+      }
+    }
+
     const priority = (params.priority as CasePriority) || CasePriority.MEDIUM;
     const task = await this.prisma.followUpTask.create({
       data: {
@@ -522,6 +532,9 @@ export class IntelligenceService {
 
     if (!customer) throw new NotFoundException('Customer not found');
     if (!invoice) throw new NotFoundException('Invoice not found');
+    if (invoice.customerId && invoice.customerId !== customer.id) {
+      throw new BadRequestException('Referenced invoice does not belong to the specified customer');
+    }
     if (invoice.status === InvoiceStatus.CANCELLED || invoice.status === InvoiceStatus.PAID) {
       throw new BadRequestException(`Cannot record promise to pay for an invoice with status ${invoice.status}`);
     }
@@ -582,6 +595,9 @@ export class IntelligenceService {
 
     if (!customer) throw new NotFoundException('Customer not found');
     if (!invoice) throw new NotFoundException('Invoice not found');
+    if (invoice.customerId && invoice.customerId !== customer.id) {
+      throw new BadRequestException('Referenced invoice does not belong to the specified customer');
+    }
     if (invoice.status === InvoiceStatus.CANCELLED || invoice.status === InvoiceStatus.PAID) {
       throw new BadRequestException(`Cannot dispute an invoice with status ${invoice.status}`);
     }
