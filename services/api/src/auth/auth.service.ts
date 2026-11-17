@@ -60,19 +60,27 @@ export class AuthService {
 
   // ── Login ──────────────────────────────────────────────────────────────────
   async login(dto: LoginDto) {
-    // Find user by email across tenants (email+tenantId is unique, but for
-    // login we search by email alone — the tenant is embedded in the JWT)
-    const user = await this.prisma.user.findFirst({
+    // Email addresses are tenant-scoped, so the same email can legitimately
+    // belong to more than one tenant. Check each active account's hash rather
+    // than authenticating whichever database row happens to be returned first.
+    const candidates = await this.prisma.user.findMany({
       where: { email: dto.email, isActive: true },
       include: { tenant: true },
     });
 
-    if (!user) {
+    if (candidates.length === 0) {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    const passwordMatch = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!passwordMatch) {
+    let user = null as (typeof candidates)[number] | null;
+    for (const candidate of candidates) {
+      if (await bcrypt.compare(dto.password, candidate.passwordHash)) {
+        user = candidate;
+        break;
+      }
+    }
+
+    if (!user) {
       throw new UnauthorizedException('Invalid email or password');
     }
 

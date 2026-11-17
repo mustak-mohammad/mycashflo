@@ -19,10 +19,44 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('🌱  Seeding myCashflo database…');
 
-  // ── Guard: skip if already seeded ─────────────────────────────────────────
+  // ── Guard / partial-seed recovery ─────────────────────────────────────────
   const existingTenant = await prisma.tenant.findFirst({ where: { slug: 'democorp' } });
   if (existingTenant) {
-    console.log('ℹ️   Already seeded — skipping. Delete tenant "democorp" to re-seed.');
+    // A previous seed can be interrupted after creating the tenant but before
+    // creating its demo accounts. Recover only those missing users so a local
+    // developer can still sign in without changing unrelated tenants/accounts.
+    const ensureUser = async (input: {
+      email: string;
+      password: string;
+      name: string;
+      role: 'ADMIN' | 'AGENT';
+    }) => {
+      const existing = await prisma.user.findFirst({
+        where: { email: input.email, tenantId: existingTenant.id },
+      });
+      if (existing) return false;
+      await prisma.user.create({
+        data: {
+          email: input.email,
+          passwordHash: await bcrypt.hash(input.password, 12),
+          name: input.name,
+          role: input.role,
+          tenantId: existingTenant.id,
+        },
+      });
+      return true;
+    };
+
+    const [adminCreated, agentCreated] = await Promise.all([
+      ensureUser({ email: 'admin@democorp.in', password: 'Admin@1234', name: 'Priya Sharma', role: 'ADMIN' }),
+      ensureUser({ email: 'agent@democorp.in', password: 'Agent@1234', name: 'Rahul Verma', role: 'AGENT' }),
+    ]);
+
+    console.log(
+      adminCreated || agentCreated
+        ? '✔  Recovered missing Demo Corp login accounts.'
+        : 'ℹ️   Demo Corp accounts already exist — skipping.',
+    );
     return;
   }
 

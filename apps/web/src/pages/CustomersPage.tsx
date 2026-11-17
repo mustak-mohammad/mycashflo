@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { PageHeader } from '../components/ui/PageHeader'
 import { useApi } from '../hooks/useApi'
 import { customersApi } from '../api/customers'
+import { callsApi } from '../api/calls'
 import { voiceApi } from '../api/voice'
 import { invoicesApi } from '../api/invoices'
 import { useAuth } from '../store/AuthContext'
@@ -104,6 +105,10 @@ export default function CustomersPage() {
   const [customerDeliveriesError, setCustomerDeliveriesError] = useState<string | null>(null)
   const [copiedCustomerLinkId, setCopiedCustomerLinkId] = useState<string | null>(null)
   const [downloadingCustPdfId, setDownloadingCustPdfId] = useState<string | null>(null)
+  const [callTarget, setCallTarget] = useState<Customer | null>(null)
+  const [callReason, setCallReason] = useState('Payment follow-up')
+  const [callSubmitting, setCallSubmitting] = useState(false)
+  const [callFeedback, setCallFeedback] = useState<{ kind: 'success' | 'error'; message: string } | null>(null)
 
   const handleOpenCustomerDeliveries = async (customer: Customer) => {
     setActiveDeliveriesCustomer(customer)
@@ -116,6 +121,42 @@ export default function CustomersPage() {
       setCustomerDeliveriesError(err?.message || 'Failed to load customer delivery activity')
     } finally {
       setLoadingCustomerDeliveries(false)
+    }
+  }
+
+  function handleOpenCall(customer: Customer) {
+    setCallTarget(customer)
+    setCallReason('Payment follow-up')
+    setCallFeedback(null)
+  }
+
+  async function handleStartSimulatedCall() {
+    if (!callTarget) return
+    setCallSubmitting(true)
+    setCallFeedback(null)
+    try {
+      const result = await callsApi.initiateOutbound({
+        customerId: callTarget.id,
+        reason: callReason.trim() || 'Payment follow-up',
+      })
+      const session = result.sessionId ? ` Session ${String(result.sessionId).slice(0, 8)} was created.` : ''
+      setCallFeedback({
+        kind: 'success',
+        message: result.isSimulated
+          ? `Chotu simulation started for ${callTarget.name}.${session} No customer was called.`
+          : `Call request accepted for ${callTarget.name}.${session}`,
+      })
+      setRefreshKey((key) => key + 1)
+    } catch (err: any) {
+      const message = err.response?.data?.message
+      setCallFeedback({
+        kind: 'error',
+        message: Array.isArray(message)
+          ? message.join(' • ')
+          : String(message || err.message || 'Unable to start the call simulation.'),
+      })
+    } finally {
+      setCallSubmitting(false)
     }
   }
 
@@ -326,6 +367,19 @@ export default function CustomersPage() {
                     <td className="px-5 py-3.5">{statusBadge(c.status)}</td>
                     <td className="px-5 py-3.5">
                       <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCall(c)}
+                          disabled={c.status === 'INACTIVE' || c.voiceConsent !== 'OPTED_IN'}
+                          title={c.voiceConsent !== 'OPTED_IN'
+                            ? 'Voice consent is required before initiating an outbound call'
+                            : c.status === 'INACTIVE'
+                              ? 'Inactive customers cannot be called'
+                              : `Start Chotu simulation for ${c.name}`}
+                          className="px-2.5 py-1 text-xs rounded font-medium bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 hover:text-white disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                        >
+                          ☎ Call Chotu
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleOpenCustomerDeliveries(c)}
@@ -727,6 +781,45 @@ export default function CustomersPage() {
                 className="px-4 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-white cursor-pointer"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {callTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md overflow-hidden rounded-2xl shadow-2xl" style={{ background: 'var(--surface, #13141c)', border: '1px solid var(--border, rgba(255,255,255,0.1))' }}>
+            <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
+              <div>
+                <h3 className="text-sm font-semibold text-white">Call with Chotu</h3>
+                <p className="mt-0.5 text-xs text-white/50">Safe local simulation</p>
+              </div>
+              <button type="button" onClick={() => setCallTarget(null)} disabled={callSubmitting} className="text-white/60 hover:text-white disabled:opacity-40" aria-label="Close call simulation">✕</button>
+            </div>
+            <div className="space-y-4 p-6 text-sm">
+              <div className="rounded-lg border border-amber-400/20 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100">
+                <strong>Simulation only.</strong> This creates a CRM call session and checks normal safety rules. It does not dial or contact {callTarget.name}.
+              </div>
+              <div className="space-y-1 rounded-lg bg-black/20 p-3 text-xs text-white/70">
+                <div><span className="text-white/45">Customer:</span> {callTarget.name}</div>
+                <div><span className="text-white/45">Number:</span> {callTarget.phone}</div>
+                <div><span className="text-white/45">Outstanding:</span> {callTarget.outstandingBalance > 0 ? fmt(callTarget.outstandingBalance) : 'No outstanding balance'}</div>
+              </div>
+              <div>
+                <label htmlFor="call-reason" className="mb-1 block text-xs text-white/70">Reason for outreach</label>
+                <input id="call-reason" type="text" value={callReason} onChange={(event) => setCallReason(event.target.value)} placeholder="Payment follow-up" className="w-full rounded-lg border border-white/10 bg-black/40 p-2.5 text-sm text-white outline-none focus:border-indigo-500" />
+              </div>
+              {callFeedback && (
+                <div className={`rounded-lg border p-3 text-xs ${callFeedback.kind === 'success' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border-rose-400/20 bg-rose-400/10 text-rose-200'}`}>
+                  {callFeedback.kind === 'success' ? '✓' : '⚠️'} {callFeedback.message}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-white/10 px-6 py-4">
+              <button type="button" onClick={() => setCallTarget(null)} disabled={callSubmitting} className="rounded-lg bg-white/5 px-4 py-2 text-xs text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-40">Close</button>
+              <button type="button" onClick={handleStartSimulatedCall} disabled={callSubmitting || callFeedback?.kind === 'success'} className="rounded-lg bg-indigo-600 px-4 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50">
+                {callSubmitting ? 'Starting simulation…' : 'Start Chotu simulation'}
               </button>
             </div>
           </div>
