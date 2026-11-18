@@ -1,4 +1,4 @@
-import { Injectable, ForbiddenException } from '@nestjs/common';
+import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import type { AuthUser } from '../auth/current-user.decorator.js';
 
@@ -260,6 +260,17 @@ export class ReportsService {
   ): Promise<LedgerResult> {
     const { tenantId, role, userId } = user;
     const { customerId, startDate, endDate } = query;
+
+    // SEC-REPORTS-001: Strict tenant isolation validation for customer parameter in reports and ledger exports
+    if (customerId) {
+      const customer = await this.prisma.customer.findFirst({
+        where: { id: customerId, tenantId },
+        select: { id: true, name: true },
+      });
+      if (!customer) {
+        throw new NotFoundException('Customer not found in current tenant');
+      }
+    }
 
     let assignedFilter: any = {};
     if (role === 'AGENT') {

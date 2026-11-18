@@ -25,6 +25,7 @@ import {
   VerifyRazorpayPaymentDto,
   RecordPaymentDto,
   RecordPaymentClaimDto,
+  RejectPaymentClaimDto,
 } from './payments.service.js';
 import { UserRole } from '@prisma/client';
 
@@ -73,6 +74,19 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Verify and reconcile a pending payment claim (Admin/Manager only)' })
   verifyPaymentClaim(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.paymentsService.verifyPaymentClaim(id, user);
+  }
+
+  @Post(':id/reject')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @ApiOperation({ summary: 'Reject an unverified payment claim without altering invoice balance (Admin/Manager only)' })
+  rejectPaymentClaim(
+    @CurrentUser() user: AuthUser,
+    @Param('id') id: string,
+    @Body() dto?: RejectPaymentClaimDto,
+  ) {
+    return this.paymentsService.rejectPaymentClaim(id, user, dto);
   }
 
   @Post('link')

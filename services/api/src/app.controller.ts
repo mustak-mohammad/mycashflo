@@ -253,6 +253,7 @@ export class AppController {
             take: 5,
             include: {
               customer: { select: { id: true, name: true, outstandingBalance: true } },
+              invoice: { select: { id: true, dueDate: true, outstanding: true } },
             },
           })
         : Promise.resolve([]),
@@ -350,6 +351,23 @@ export class AppController {
       }
     }
 
+    const rawPendingTasks = (pendingCallbacks || []) as any[];
+    const missingCustomerIds = rawPendingTasks
+      .filter((t: any) => !t.collectionCase?.customer?.name && t.customerId)
+      .map((t: any) => t.customerId as string);
+    let customerMap = new Map<string, string>();
+    if (missingCustomerIds.length > 0 && this.prisma.customer?.findMany) {
+      try {
+        const custs = await this.prisma.customer.findMany({
+          where: { tenantId, id: { in: missingCustomerIds } },
+          select: { id: true, name: true },
+        });
+        customerMap = new Map(custs.map((c: any) => [c.id, c.name]));
+      } catch {
+        // safe fallback
+      }
+    }
+
     return {
       totalReceivables: receivables,
       totalBilled: billed,
@@ -373,19 +391,25 @@ export class AppController {
       recentPayments: (recentPayments || []).map((p: any) => ({
         id: p.id,
         ref: p.ref,
+        reference: p.ref,
         amount: Number(p.amount),
+        currency: p.currency || 'INR',
         method: p.method,
         paidAt: p.paidAt,
+        paymentDate: p.paidAt,
         customerName: p.customer?.name ?? '',
         invoiceNumber: p.invoice?.number ?? '',
       })),
       collectionPriorities: (collectionPriorities || []).map((c: any) => ({
         id: c.id,
+        customerId: c.customerId || c.customer?.id || '',
         caseNumber: c.caseNumber || `CASE-${c.id.slice(0, 6)}`,
         priority: c.priority,
         status: c.status,
         customerName: c.customer?.name ?? '',
         outstandingBalance: Number(c.customer?.outstandingBalance ?? 0),
+        overdueAmount: Number(c.invoice?.outstanding ?? c.customer?.outstandingBalance ?? 0),
+        daysOverdue: c.invoice?.dueDate ? Math.max(0, Math.floor((now.getTime() - new Date(c.invoice.dueDate).getTime()) / 86_400_000)) : 0,
       })),
       promisesToPay: (promisesToPay || []).map((ptp: any) => ({
         id: ptp.id,
@@ -395,12 +419,16 @@ export class AppController {
         customerName: ptp.invoice?.customer?.name ?? '',
         invoiceNumber: ptp.invoice?.number ?? '',
       })),
-      pendingCallbacks: (pendingCallbacks || []).map((task: any) => ({
+      pendingCallbacks: rawPendingTasks.map((task: any) => ({
         id: task.id,
         title: task.title,
         dueDate: task.dueDate,
         priority: task.priority,
-        customerName: task.customer?.name ?? task.collectionCase?.customer?.name ?? '',
+        customerName:
+          task.customer?.name ??
+          task.collectionCase?.customer?.name ??
+          (task.customerId ? customerMap.get(task.customerId) : undefined) ??
+          '',
       })),
     };
   }

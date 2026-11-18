@@ -17,11 +17,21 @@ async function bootstrap() {
   // Global prefix
   app.setGlobalPrefix('api');
 
-  // Increase JSON and URL-encoded body limit to 50MB to support audio recording blobs
+  // Security Headers Middleware (SEC-CSRF-001: defense-in-depth against MIME sniffing, clickjacking & framing)
+  app.use((_req: any, res: any, next: any) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
+    next();
+  });
+
+  // Global JSON and URL-encoded limit restricted to 1MB to prevent DoS memory exhaustion (SEC-INPUT-001)
   // Preserve raw request body buffer for cryptographic webhook signature verification (e.g. Stripe, Razorpay)
   app.use(
     express.json({
-      limit: '50mb',
+      limit: '1mb',
       verify: (req: any, _res, buf) => {
         req.rawBody = buf;
       },
@@ -30,19 +40,42 @@ async function bootstrap() {
   app.use(
     express.urlencoded({
       extended: true,
-      limit: '50mb',
+      limit: '1mb',
       verify: (req: any, _res, buf) => {
         req.rawBody = buf;
       },
     }),
   );
 
-  // CORS — only allow the React dev server in development
+  // CORS — validate allowed origins and protect against cross-site exploitation (SEC-CSRF-001)
+  const rawWebOrigin = config.get<string>('WEB_ORIGIN') ?? 'http://localhost:5173';
+  const allowedOrigins = rawWebOrigin
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
   app.enableCors({
-    origin: webOrigin,
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow requests with no origin (mobile clients, curl, server-to-server) or matching allowed list
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        (process.env.NODE_ENV !== 'production' && origin.startsWith('http://localhost:'))
+      ) {
+        callback(null, true);
+      } else {
+        callback(new Error(`CORS blocked: Origin ${origin} not allowed`));
+      }
+    },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    exposedHeaders: ['Content-Disposition'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    exposedHeaders: [
+      'Content-Disposition',
+      'RateLimit-Limit',
+      'RateLimit-Remaining',
+      'RateLimit-Reset',
+      'Retry-After',
+    ],
     credentials: true,
   });
 
@@ -64,6 +97,9 @@ async function bootstrap() {
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, document);
+
+  // Graceful shutdown hooks for persistent Node.js service (SIGTERM / SIGINT)
+  app.enableShutdownHooks();
 
   await app.listen(port);
   Logger.log(`🚀 myCashflo API running on http://localhost:${port}/api`, 'Bootstrap');

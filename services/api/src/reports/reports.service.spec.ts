@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { NotFoundException } from '@nestjs/common';
 import { ReportsService } from './reports.service.js';
 import type { PrismaService } from '../prisma/prisma.service.js';
 
@@ -28,6 +29,7 @@ describe('ReportsService - Ledger', () => {
       },
       customer: {
         count: vi.fn(),
+        findFirst: vi.fn(),
       },
       paymentPromise: {
         count: vi.fn(),
@@ -38,6 +40,7 @@ describe('ReportsService - Ledger', () => {
   });
 
   it('should compute chronological running balance accurately for debits and credits', async () => {
+    prisma.customer.findFirst.mockResolvedValueOnce({ id: 'cust-1', name: 'Acme Client' });
     prisma.invoice.findMany.mockResolvedValueOnce([
       {
         id: 'inv-1',
@@ -129,5 +132,19 @@ describe('ReportsService - Ledger', () => {
     expect(csv).toContain("'+John Doe");
     expect(csv).toContain("'=1+1");
     expect(csv).toContain("'@malicious_macro");
+  });
+
+  it('should enforce strict tenant isolation and reject cross-tenant customer in getLedger (SEC-REPORTS-001)', async () => {
+    // When customer does not belong to tenant-123
+    prisma.customer.findFirst.mockResolvedValueOnce(null);
+
+    await expect(
+      service.getLedger(mockUser, { customerId: 'cust-foreign-tenant' }),
+    ).rejects.toThrow(NotFoundException);
+
+    expect(prisma.customer.findFirst).toHaveBeenCalledWith({
+      where: { id: 'cust-foreign-tenant', tenantId: 'tenant-123' },
+      select: { id: true, name: true },
+    });
   });
 });

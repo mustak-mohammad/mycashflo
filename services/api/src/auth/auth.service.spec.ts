@@ -23,6 +23,7 @@ describe('AuthService - Refresh Token Flow & Security Tests', () => {
       {
         id: 'user_001',
         email: 'agent@democorp.in',
+        passwordHash: '$2b$12$eX4mPl3H4sH1234567890abcdefghijklmnopqrstuv',
         name: 'Agent Smith',
         role: 'AGENT',
         tenantId: 'tenant_001',
@@ -105,7 +106,15 @@ describe('AuthService - Refresh Token Flow & Security Tests', () => {
       },
       user: {
         findFirst: vi.fn().mockImplementation(async ({ where }) => {
-          return users.find((u) => u.id === where.id && (where.tenantId === undefined || u.tenantId === where.tenantId) && (where.isActive === undefined || u.isActive === where.isActive)) || null;
+          return (
+            users.find(
+              (u) =>
+                (where.id === undefined || u.id === where.id) &&
+                (where.email === undefined || u.email === where.email) &&
+                (where.tenantId === undefined || u.tenantId === where.tenantId) &&
+                (where.isActive === undefined || u.isActive === where.isActive),
+            ) || null
+          );
         }),
         update: vi.fn().mockImplementation(async ({ where, data }) => {
           const u = users.find((item) => item.id === where.id);
@@ -399,6 +408,89 @@ describe('AuthService - Refresh Token Flow & Security Tests', () => {
       expect(dbUser.role).toBe('AGENT');
       expect(dbUser.tenantId).toBe('tenant_001');
       expect(dbUser.email).toBe('agent@democorp.in');
+    });
+  });
+
+  // ── Password Reset Flow (SEC-AUTH-001) ──────────────────────────────────
+  describe('Password Reset Flow (SEC-AUTH-001)', () => {
+    it('19. should issue cryptographically signed, expiring reset token for valid user', async () => {
+      const res = await service.forgotPassword({ email: 'agent@democorp.in' });
+      expect(res.success).toBe(true);
+      expect(res.message).toContain('password reset instructions have been issued');
+      expect(res.token).toBeDefined();
+
+      // Verify token payload structure
+      const payload = mockJwt.verify(res.token, { secret: ACCESS_SECRET });
+      expect(payload.sub).toBe('user_001');
+      expect(payload.email).toBe('agent@democorp.in');
+      expect(payload.type).toBe('PASSWORD_RESET');
+      expect(payload.pwdSig).toBeDefined();
+    });
+
+    it('20. should prevent email enumeration when requesting reset for non-existent email', async () => {
+      const res = await service.forgotPassword({ email: 'nonexistent@democorp.in' });
+      expect(res.success).toBe(true);
+      expect(res.message).toContain('password reset instructions have been issued');
+      expect(res.token).toBeUndefined();
+    });
+
+    it('21. should reset password, invalidate old sessions, and enforce single-use token', async () => {
+      const forgotRes = await service.forgotPassword({ email: 'agent@democorp.in' });
+      const resetToken = forgotRes.token!;
+
+      // Reset password with strong password
+      const resetRes = await service.resetPassword({
+        token: resetToken,
+        newPassword: 'NewSecretPassword@2026',
+      });
+      expect(resetRes.success).toBe(true);
+      expect(resetRes.message).toContain('successfully reset');
+
+      // Attempting to reuse the exact same reset token must fail (single-use guarantee)
+      await expect(
+        service.resetPassword({
+          token: resetToken,
+          newPassword: 'AnotherPassword@2026',
+        }),
+      ).rejects.toThrow('Password reset token has already been used or invalidated');
+    });
+
+    it('22. should reject weak password during reset', async () => {
+      const forgotRes = await service.forgotPassword({ email: 'agent@democorp.in' });
+      await expect(
+        service.resetPassword({
+          token: forgotRes.token!,
+          newPassword: 'weak',
+        }),
+      ).rejects.toThrow('New password must be at least 8 characters long');
+    });
+  });
+
+  // ── Refresh Token Race Condition Grace Window (SEC-SESSION-001) ──────────
+  describe('Refresh Token Rotation Race Condition Grace Window (SEC-SESSION-001)', () => {
+    it('23. should return rotated tokens within grace period when REFRESH_TOKEN_GRACE_MS is enabled', async () => {
+      // Mock config to enable 15s grace window
+      mockConfig.get.mockImplementation((key: string) => {
+        if (key === 'JWT_ACCESS_SECRET') return ACCESS_SECRET;
+        if (key === 'JWT_REFRESH_SECRET') return REFRESH_SECRET;
+        if (key === 'REFRESH_TOKEN_GRACE_MS') return 15000;
+        return null;
+      });
+
+      const initial = await service.issueTokens('user_001', 'tenant_001', 'AGENT');
+
+      // Request 1 rotates the token
+      const res1 = await service.refresh(initial.refreshToken);
+      expect(res1.tokens.accessToken).toBeDefined();
+
+      // Request 2 arrives immediately afterwards presenting the old token (concurrent race condition)
+      const res2 = await service.refresh(initial.refreshToken);
+      expect(res2.tokens.accessToken).toBe(res1.tokens.accessToken);
+      expect(res2.tokens.refreshToken).toBe(res1.tokens.refreshToken);
+
+      // Verify active sessions were NOT invalidated
+      const userTokens = storedTokens.filter((t) => t.userId === 'user_001' && !t.revoked);
+      expect(userTokens.length).toBeGreaterThan(0);
     });
   });
 });

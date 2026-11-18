@@ -29,6 +29,7 @@ export const followUpsApi = {
     priority?: string
     customerId?: string
     collectionCaseId?: string
+    assignedTo?: string
   }) => client.post<FollowUpTask>('/follow-ups', data).then((r) => r.data),
 
   update: (id: string, data: Partial<FollowUpTask>) =>

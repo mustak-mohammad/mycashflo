@@ -178,6 +178,16 @@ export class RecordPaymentClaimDto {
   evidenceUrl?: string;
 }
 
+export class RejectPaymentClaimDto {
+  @ApiPropertyOptional({
+    example: 'Payment reference could not be verified on bank records',
+    description: 'Reason for rejecting the payment claim',
+  })
+  @IsOptional()
+  @IsString()
+  reason?: string;
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 @Injectable()
 export class PaymentsService {
@@ -660,6 +670,78 @@ export class PaymentsService {
       invoiceNumber: invoice.number,
       remainingOutstanding: newOutstanding,
       newStatus,
+    };
+  }
+
+  async rejectPaymentClaim(id: string, user: AuthUser, dto?: RejectPaymentClaimDto) {
+    const { tenantId, userId, role } = user;
+
+    if (role === 'AGENT') {
+      throw new ForbiddenException('Only Administrators and Managers can reject payment claims');
+    }
+
+    const payment = await this.prisma.payment.findFirst({
+      where: { id, tenantId },
+      include: { invoice: true, customer: true },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Payment claim not found in current tenant');
+    }
+
+    if (payment.status === PaymentStatus.COMPLETED) {
+      throw new BadRequestException('Cannot reject an already verified and completed payment');
+    }
+
+    if (payment.status === PaymentStatus.FAILED) {
+      return {
+        success: true,
+        alreadyRejected: true,
+        payment,
+        invoiceNumber: payment.invoice?.number,
+        outstandingBalance: Number(payment.invoice?.outstanding ?? 0),
+        invoiceStatus: payment.invoice?.status,
+        message: 'Payment claim has already been rejected.',
+      };
+    }
+
+    if (payment.status !== PaymentStatus.PENDING) {
+      throw new BadRequestException(`Cannot reject payment with status '${payment.status}'`);
+    }
+
+    const rejectionReason = dto?.reason?.trim() || 'Claim rejected by administrator';
+
+    const updatedPayment = await this.prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: PaymentStatus.FAILED,
+        notes: `${payment.notes || ''} [REJECTED by ${userId}: ${rejectionReason} at ${new Date().toISOString()}]`.trim(),
+      },
+    });
+
+    await this.auditLogs.log({
+      tenantId,
+      userId,
+      action: 'payment.claim_rejected',
+      entityType: 'Payment',
+      entityId: payment.id,
+      metadata: {
+        invoiceId: payment.invoiceId,
+        invoiceNumber: payment.invoice?.number,
+        rejectedAmount: Number(payment.amount),
+        reference: payment.ref,
+        reason: rejectionReason,
+        outstandingBalance: Number(payment.invoice?.outstanding ?? 0),
+      },
+    });
+
+    return {
+      success: true,
+      payment: updatedPayment,
+      invoiceNumber: payment.invoice?.number,
+      outstandingBalance: Number(payment.invoice?.outstanding ?? 0),
+      invoiceStatus: payment.invoice?.status,
+      message: 'Payment claim has been rejected. Invoice balance remains unchanged.',
     };
   }
 

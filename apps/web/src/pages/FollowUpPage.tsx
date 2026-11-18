@@ -4,9 +4,12 @@ import { StatCard } from '../components/ui/StatCard'
 import { ConfirmDialog } from '../components/ui/ConfirmDialog'
 import { useApi } from '../hooks/useApi'
 import { followUpsApi } from '../api/followUps'
+import { customersApi } from '../api/customers'
+import { usersApi, type UserItem } from '../api/users'
+import { useAuth } from '../store/AuthContext'
 import { useToast } from '../store/ToastContext'
 import { extractSafeErrorMessage } from '../utils/safeError'
-import type { FollowUpTask } from '../types'
+import type { FollowUpTask, Customer } from '../types'
 
 const PRIORITY_COLOR: Record<string, string> = {
   URGENT: 'var(--danger)',
@@ -17,11 +20,18 @@ const PRIORITY_COLOR: Record<string, string> = {
 
 export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
   const toast = useToast()
+  const { user } = useAuth()
+  const isAgent = user?.role === 'AGENT'
   const [filterDone, setFilterDone] = useState<boolean | undefined>(undefined)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [newTitle, setNewTitle] = useState('')
   const [newDue, setNewDue] = useState(() => new Date().toISOString().split('T')[0])
   const [newPriority, setNewPriority] = useState<'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT'>('MEDIUM')
+  const [selectedCustomerId, setSelectedCustomerId] = useState<string>('')
+  const [selectedAssigneeId, setSelectedAssigneeId] = useState<string>('')
+  const [newDescription, setNewDescription] = useState('')
+  const [customers, setCustomers] = useState<Customer[]>([])
+  const [teamUsers, setTeamUsers] = useState<UserItem[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -30,6 +40,28 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const deleteInFlightRef = useRef(false)
+
+  const handleOpenModal = () => {
+    setFormError(null)
+    setIsModalOpen(true)
+    customersApi
+      .list({ limit: 100 })
+      .then((res: any) => {
+        const list = Array.isArray(res?.data) ? res.data : Array.isArray(res) ? res : []
+        setCustomers(list)
+      })
+      .catch(() => setCustomers([]))
+
+    if (!isAgent) {
+      usersApi
+        .list()
+        .then((res: any) => {
+          const list = Array.isArray(res) ? res : Array.isArray(res?.data) ? res.data : []
+          setTeamUsers(list)
+        })
+        .catch(() => setTeamUsers([]))
+    }
+  }
 
   const fetcher = useCallback(
     () => followUpsApi.list({ done: filterDone }),
@@ -66,11 +98,17 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
     try {
       await followUpsApi.create({
         title: newTitle.trim(),
+        description: newDescription.trim() || undefined,
         dueDate: new Date(newDue).toISOString(),
         priority: newPriority,
+        customerId: selectedCustomerId || undefined,
+        assignedTo: (!isAgent && selectedAssigneeId) ? selectedAssigneeId : undefined,
       })
       toast.success(`Follow-up task "${newTitle.trim()}" created.`)
       setNewTitle('')
+      setNewDescription('')
+      setSelectedCustomerId('')
+      setSelectedAssigneeId('')
       setIsModalOpen(false)
       refetch()
     } catch (err) {
@@ -111,10 +149,7 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
           action={
             <button
               type="button"
-              onClick={() => {
-                setFormError(null)
-                setIsModalOpen(true)
-              }}
+              onClick={handleOpenModal}
               className="px-4 py-2 rounded-lg text-sm font-medium text-white cursor-pointer"
               style={{ background: 'var(--primary)', border: 'none' }}
             >
@@ -126,10 +161,7 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
         <div className="flex justify-end">
           <button
             type="button"
-            onClick={() => {
-              setFormError(null)
-              setIsModalOpen(true)
-            }}
+            onClick={handleOpenModal}
             className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 cursor-pointer"
           >
             + Add Task
@@ -225,7 +257,7 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
           </div>
         ) : (
           tasks.map((t) => {
-            const customerName = t.collectionCase?.customer?.name ?? 'General Account'
+            const customerName = t.collectionCase?.customer?.name ?? t.customer?.name ?? 'General Account'
             return (
               <div
                 key={t.id}
@@ -363,6 +395,61 @@ export function FollowUpsView({ hideHeader }: { hideHeader?: boolean } = {}) {
                     <option value="URGENT">Urgent</option>
                   </select>
                 </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label htmlFor="followup-customer" className="block text-xs font-medium text-slate-300 mb-1">
+                    Related Customer (Optional)
+                  </label>
+                  <select
+                    id="followup-customer"
+                    value={selectedCustomerId}
+                    onChange={(e) => setSelectedCustomerId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="">General Account (No Customer)</option>
+                    {(Array.isArray(customers) ? customers : []).map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name} {c.company ? `(${c.company})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {!isAgent && (
+                  <div>
+                    <label htmlFor="followup-assignee" className="block text-xs font-medium text-slate-300 mb-1">
+                      Assign To (Optional)
+                    </label>
+                    <select
+                      id="followup-assignee"
+                      value={selectedAssigneeId}
+                      onChange={(e) => setSelectedAssigneeId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="">Myself (Default)</option>
+                      {(Array.isArray(teamUsers) ? teamUsers : []).filter((u) => u.isActive).map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.name} ({u.role})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="followup-description" className="block text-xs font-medium text-slate-300 mb-1">
+                  Notes / Details (Optional)
+                </label>
+                <textarea
+                  id="followup-description"
+                  rows={2}
+                  placeholder="e.g. Spoke with account manager, promised wire transfer by 3 PM"
+                  value={newDescription}
+                  onChange={(e) => setNewDescription(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg text-sm text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-indigo-500 resize-none"
+                />
               </div>
 
               <div className="flex justify-end gap-2 pt-2">

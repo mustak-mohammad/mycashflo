@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { validateEnvironment } from './common/env.validation.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
+import { RateLimitGuard } from './common/rate-limit.guard.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { CustomersModule } from './customers/customers.module.js';
@@ -53,7 +55,13 @@ import { PlatformModule } from './platform/platform.module.js';
     ChotuModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: RateLimitGuard,
+    },
+  ],
 })
 export class AppModule {}
 

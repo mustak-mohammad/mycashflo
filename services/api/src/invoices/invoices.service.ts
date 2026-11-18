@@ -101,6 +101,17 @@ export class InvoicesService {
   async exportCsv(user: AuthUser, query: InvoiceQueryDto): Promise<string> {
     const { tenantId, role, userId } = user;
 
+    // SEC-REPORTS-001: Strict tenant isolation validation for customer export query
+    if (query.customerId) {
+      const customer = await this.prisma.customer.findFirst({
+        where: { id: query.customerId, tenantId },
+        select: { id: true },
+      });
+      if (!customer) {
+        throw new NotFoundException('Customer not found in current tenant');
+      }
+    }
+
     let assignedFilter: any = {};
     if (role === 'AGENT') {
       const allowedCustomerIds = await this.getAgentCustomerIds(tenantId, userId);

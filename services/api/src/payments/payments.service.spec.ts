@@ -638,13 +638,20 @@ describe('PaymentsService - Razorpay Security Hardening, Replay & Reconciliation
         }),
       },
       payment: {
+        count: vi.fn().mockImplementation(async ({ where }) => filterPayments(where).length),
         findMany: vi.fn().mockImplementation(async ({ where, orderBy }) => filterPayments(where, orderBy)),
         findFirst: vi.fn().mockImplementation(async ({ where, orderBy }) => {
           const list = filterPayments(where, orderBy);
           const match = list[0];
           if (!match) return null;
           const invoice = invoices.find((inv) => inv.id === match.invoiceId);
-          return { ...match, invoice };
+          const customer = invoice ? customers.find((c) => c.id === invoice.customerId) : null;
+          return { ...match, invoice: invoice ? { ...invoice, customer } : undefined, customer };
+        }),
+        update: vi.fn().mockImplementation(async ({ where, data }) => {
+          const p = payments.find((item) => item.id === where.id);
+          if (p) Object.assign(p, data);
+          return p ? { ...p } : null;
         }),
         create: vi.fn().mockImplementation(async ({ data }) => {
           if (payments.some((p) => p.ref === data.ref)) {
@@ -2716,6 +2723,187 @@ describe('PaymentsService - Razorpay Security Hardening, Replay & Reconciliation
       expect(recovered.orderId).toBe('order_DelayedVisible1');
       expect(recovered.reusedExistingOrder).toBe(true);
       expect(recovered.recovered).toBe(true);
+    });
+
+    describe('Razorpay payment claim & reconciliation verification (Test Mode)', () => {
+      const adminUser: any = { userId: 'usr_admin_01', tenantId: 'tenant_01', role: 'ADMIN' };
+      const managerUser: any = { userId: 'usr_mgr_01', tenantId: 'tenant_01', role: 'MANAGER' };
+      const agentUser: any = { userId: 'usr_agent_01', tenantId: 'tenant_01', role: 'AGENT' };
+      const otherTenantAdmin: any = { userId: 'usr_admin_02', tenantId: 'tenant_02', role: 'ADMIN' };
+
+      it('Item 1: confirms the payment claim appears as Pending Verification (AWAITING_VERIFICATION)', async () => {
+        // 1. Submit payment claim for invoice inv_01 (amount 4000 of 10000 outstanding)
+        const claimRes = await service.recordPaymentClaim(adminUser, {
+          invoiceId: 'inv_01',
+          amount: 4000,
+          reference: 'UTR-CLAIM-TEST-001',
+          notes: 'Customer transferred via NEFT',
+          evidenceUrl: 'https://storage.mycashflo.internal/receipts/rec_001.pdf',
+        });
+
+        // Claim is returned as AWAITING_VERIFICATION
+        expect(claimRes.success).toBe(true);
+        expect(claimRes.claimStatus).toBe('AWAITING_VERIFICATION');
+        expect(claimRes.payment.status).toBe(PaymentStatus.PENDING);
+        expect(claimRes.payment.paidAt).toBeNull();
+        expect(claimRes.payment.notes).toContain('AWAITING_VERIFICATION: Customer transferred via NEFT');
+        expect(claimRes.payment.notes).toContain('[Evidence: https://storage.mycashflo.internal/receipts/rec_001.pdf]');
+
+        // Outstanding invoice balance and customer balance remain STRICTLY UNTOUCHED
+        expect(invoices[0].outstanding).toBe(10000);
+        expect(invoices[0].status).toBe(InvoiceStatus.OPEN);
+        expect(customers[0].outstandingBalance).toBe(10000);
+
+        // Verify that listing payments surfaces the pending claim
+        const list = await service.findAll(adminUser, { status: PaymentStatus.PENDING });
+        expect(list.data.some((p) => p.ref === 'UTR-CLAIM-TEST-001' && p.status === PaymentStatus.PENDING)).toBe(true);
+      });
+
+      it('Item 2, 3 & 4: confirms admin can verify and approve, creating exactly one payment and updating invoice balance', async () => {
+        // Setup pending claim
+        const claimRes = await service.recordPaymentClaim(adminUser, {
+          invoiceId: 'inv_01',
+          amount: 4000,
+          reference: 'UTR-CLAIM-TEST-002',
+          notes: 'Paid via RTGS',
+        });
+        const claimId = claimRes.payment.id;
+        const initialCount = payments.length;
+        expect(initialCount).toBe(1);
+
+        // Agent cannot verify
+        await expect(service.verifyPaymentClaim(claimId, agentUser)).rejects.toThrow(
+          ForbiddenException,
+        );
+
+        // Admin verifies and approves the claim
+        const verifyRes = await service.verifyPaymentClaim(claimId, adminUser);
+        expect(verifyRes.success).toBe(true);
+        expect(verifyRes.payment.status).toBe(PaymentStatus.COMPLETED);
+        expect(verifyRes.payment.paidAt).toBeInstanceOf(Date);
+        expect(verifyRes.remainingOutstanding).toBe(6000);
+        expect(verifyRes.newStatus).toBe(InvoiceStatus.PARTIALLY_PAID);
+
+        // Item 3: Confirms exactly ONE payment record exists (no duplicate inserted)
+        expect(payments).toHaveLength(initialCount);
+        expect(payments.filter((p) => p.id === claimId)).toHaveLength(1);
+        expect(payments[0].status).toBe(PaymentStatus.COMPLETED);
+
+        // Item 4: Confirms invoice balance updated correctly
+        expect(invoices[0].outstanding).toBe(6000);
+        expect(invoices[0].status).toBe(InvoiceStatus.PARTIALLY_PAID);
+        expect(customers[0].outstandingBalance).toBe(6000);
+
+        // Test full payment settlement to PAID status
+        const claimFull = await service.recordPaymentClaim(managerUser, {
+          invoiceId: 'inv_01',
+          amount: 6000,
+          reference: 'UTR-CLAIM-TEST-003',
+          notes: 'Final balance clearance',
+        });
+        const verifyFull = await service.verifyPaymentClaim(claimFull.payment.id, managerUser);
+        expect(verifyFull.remainingOutstanding).toBe(0);
+        expect(verifyFull.newStatus).toBe(InvoiceStatus.PAID);
+        expect(invoices[0].outstanding).toBe(0);
+        expect(invoices[0].status).toBe(InvoiceStatus.PAID);
+        expect(customers[0].outstandingBalance).toBe(0);
+      });
+
+      it('Item 5: confirms duplicate callbacks or repeat verification calls cannot create duplicate payments', async () => {
+        // Record and verify a claim
+        const claimRes = await service.recordPaymentClaim(adminUser, {
+          invoiceId: 'inv_01',
+          amount: 5000,
+          reference: 'UTR-CLAIM-DUP-001',
+        });
+        const claimId = claimRes.payment.id;
+        await service.verifyPaymentClaim(claimId, adminUser);
+        expect(invoices[0].outstanding).toBe(5000);
+        const paymentCount = payments.length;
+
+        // Duplicate verification call on the same claim
+        const dupRes = await service.verifyPaymentClaim(claimId, adminUser);
+        expect(dupRes.success).toBe(true);
+        expect(dupRes.alreadyVerified).toBe(true);
+
+        // Invoice balance is NOT double-deducted, and no duplicate payment row created
+        expect(invoices[0].outstanding).toBe(5000);
+        expect(payments).toHaveLength(paymentCount);
+      });
+
+      it('Item 6: confirms rejected claims do not reduce the invoice balance', async () => {
+        // Record claim
+        const claimRes = await service.recordPaymentClaim(adminUser, {
+          invoiceId: 'inv_01',
+          amount: 4000,
+          reference: 'UTR-CLAIM-REJECT-001',
+          notes: 'Invalid bank slip',
+        });
+        const claimId = claimRes.payment.id;
+        expect(invoices[0].outstanding).toBe(10000);
+
+        // Agent cannot reject
+        await expect(
+          service.rejectPaymentClaim(claimId, agentUser, { reason: 'Agent reject attempt' }),
+        ).rejects.toThrow(ForbiddenException);
+
+        // Admin rejects claim
+        const rejectRes = await service.rejectPaymentClaim(claimId, adminUser, {
+          reason: 'Bank UTR not found on statement',
+        });
+        expect(rejectRes.success).toBe(true);
+        expect(rejectRes.payment.status).toBe(PaymentStatus.FAILED);
+        expect(rejectRes.payment.notes).toContain('REJECTED by usr_admin_01: Bank UTR not found on statement');
+
+        // Invoice outstanding balance and status remain strictly unchanged
+        expect(invoices[0].outstanding).toBe(10000);
+        expect(invoices[0].status).toBe(InvoiceStatus.OPEN);
+        expect(customers[0].outstandingBalance).toBe(10000);
+
+        // Cannot verify an already rejected claim
+        await expect(service.verifyPaymentClaim(claimId, adminUser)).rejects.toThrow(
+          BadRequestException,
+        );
+
+        // Repeat rejection returns idempotent alreadyRejected: true without side-effects
+        const repeatReject = await service.rejectPaymentClaim(claimId, adminUser);
+        expect(repeatReject.alreadyRejected).toBe(true);
+        expect(invoices[0].outstanding).toBe(10000);
+      });
+
+      it('Item 7: checks that tenant isolation is preserved across claim creation, verification, and rejection', async () => {
+        // 1. Cannot create claim for invoice in another tenant
+        await expect(
+          service.recordPaymentClaim(otherTenantAdmin, {
+            invoiceId: 'inv_01', // inv_01 belongs to tenant_01
+            amount: 1000,
+            reference: 'UTR-X-TENANT-001',
+          }),
+        ).rejects.toThrow(NotFoundException);
+
+        // 2. Create claim under tenant_01
+        const claimTenant1 = await service.recordPaymentClaim(adminUser, {
+          invoiceId: 'inv_01',
+          amount: 2000,
+          reference: 'UTR-TENANT1-001',
+        });
+
+        // 3. Admin of tenant_02 attempts to verify claim belonging to tenant_01 -> rejected with NotFoundException
+        await expect(
+          service.verifyPaymentClaim(claimTenant1.payment.id, otherTenantAdmin),
+        ).rejects.toThrow('Payment claim not found in current tenant');
+
+        // 4. Admin of tenant_02 attempts to reject claim belonging to tenant_01 -> rejected with NotFoundException
+        await expect(
+          service.rejectPaymentClaim(claimTenant1.payment.id, otherTenantAdmin, {
+            reason: 'Cross-tenant reject attempt',
+          }),
+        ).rejects.toThrow('Payment claim not found in current tenant');
+
+        // Tenant 01 balances and claim status remain completely untouched
+        expect(invoices[0].outstanding).toBe(10000);
+        expect(claimTenant1.payment.status).toBe(PaymentStatus.PENDING);
+      });
     });
   });
 });

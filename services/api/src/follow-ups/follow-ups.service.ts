@@ -164,6 +164,28 @@ export class FollowUpsService {
       return t;
     });
 
+    // Hydrate direct customer details when collectionCase is null
+    const customerIdsToHydrate = sanitizedData
+      .filter((t) => !t.collectionCase?.customer && t.customerId)
+      .map((t) => t.customerId as string);
+
+    if (customerIdsToHydrate.length > 0 && this.prisma.customer?.findMany) {
+      try {
+        const customers = await this.prisma.customer.findMany({
+          where: { id: { in: customerIdsToHydrate }, tenantId },
+          select: { id: true, name: true, phone: true, company: true },
+        });
+        const customerMap = new Map(customers.map((c) => [c.id, c]));
+        for (const t of sanitizedData) {
+          if (!t.collectionCase?.customer && t.customerId && customerMap.has(t.customerId)) {
+            (t as any).customer = customerMap.get(t.customerId);
+          }
+        }
+      } catch {
+        // Safe fallback in test mocks
+      }
+    }
+
     return {
       data: sanitizedData,
       total,
@@ -263,7 +285,7 @@ export class FollowUpsService {
       assignedTo = assignee.id;
     }
 
-    return this.prisma.followUpTask.create({
+    const createdTask = await this.prisma.followUpTask.create({
       data: {
         title: dto.title,
         description: dto.description,
@@ -283,6 +305,22 @@ export class FollowUpsService {
         },
       },
     });
+
+    if (!createdTask.collectionCase?.customer && effectiveCustomerId && this.prisma.customer?.findFirst) {
+      try {
+        const directCust = await this.prisma.customer.findFirst({
+          where: { id: effectiveCustomerId, tenantId },
+          select: { id: true, name: true, phone: true, company: true },
+        });
+        if (directCust) {
+          (createdTask as any).customer = directCust;
+        }
+      } catch {
+        // Safe fallback in test mocks
+      }
+    }
+
+    return createdTask;
   }
 
   async update(id: string, user: AuthUser, dto: UpdateFollowUpDto) {

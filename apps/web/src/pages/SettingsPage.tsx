@@ -9,6 +9,7 @@ import type { IntegrationItem } from '../types'
 
 import { TeamUsersView } from '../components/team/TeamUsersView'
 import { ProfileSecuritySection } from '../components/auth/ProfileSecuritySection'
+import { BusinessProfileSection } from '../components/settings/BusinessProfileSection'
 import { TenantAuditLogsView } from '../components/audit/TenantAuditLogsView'
 import { VoicePromptsView } from './VoicePromptsPage'
 
@@ -385,6 +386,7 @@ export default function SettingsPage() {
       {/* Tab Panels */}
       {activeTab === 'profile' && (
         <div className="space-y-6">
+          <BusinessProfileSection />
           <ProfileSecuritySection />
         </div>
       )}

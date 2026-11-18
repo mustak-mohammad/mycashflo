@@ -49,6 +49,31 @@ export interface CreateAuditLogParams {
   ipAddress?: string;
 }
 
+const SENSITIVE_KEYS_REGEX =
+  /^(password|passwordhash|currentpassword|newpassword|token|accesstoken|refreshtoken|secret|clientsecret|apikey|keysecret|webhooksecret|authorization|authheader|privatekey|credential|credentials)$/i;
+
+export function sanitizeAuditMetadata(obj: any, depth = 0): any {
+  if (!obj || typeof obj !== 'object' || depth > 5) {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map((item) => sanitizeAuditMetadata(item, depth + 1));
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (SENSITIVE_KEYS_REGEX.test(key)) {
+      clean[key] = '[REDACTED]';
+    } else if (typeof value === 'object' && value !== null) {
+      clean[key] = sanitizeAuditMetadata(value, depth + 1);
+    } else if (typeof value === 'string' && /^(bearer\s+|eyjh)/i.test(value)) {
+      clean[key] = '[REDACTED]';
+    } else {
+      clean[key] = value;
+    }
+  }
+  return clean;
+}
+
 @Injectable()
 export class AuditLogsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -81,10 +106,10 @@ export class AuditLogsService {
           action: params.action,
           entityType: params.entityType,
           entityId: params.entityId,
-          metadata: {
+          metadata: sanitizeAuditMetadata({
             ...(params.metadata ?? {}),
             ...(resolvedUserId !== params.userId ? { actor: params.userId } : {}),
-          },
+          }),
           ipAddress: params.ipAddress,
         },
       });

@@ -47,4 +47,7 @@ export const paymentsApi = {
 
   verifyPaymentClaim: (id: string) =>
     apiClient.post(`/payments/${id}/verify`).then((r) => r.data),
+
+  rejectPaymentClaim: (id: string, reason?: string) =>
+    apiClient.post(`/payments/${id}/reject`, { reason }).then((r) => r.data),
 }

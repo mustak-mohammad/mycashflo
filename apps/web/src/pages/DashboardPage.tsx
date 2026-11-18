@@ -193,7 +193,7 @@ export default function DashboardPage() {
               </p>
             </div>
             <div className="text-xs font-semibold px-2.5 py-1 rounded-full bg-rose-500/10 text-rose-300 border border-rose-500/20 self-start sm:self-auto">
-              Total Overdue: {fmt(data.agingBreakdown.thresholdOverdueAmount ?? data.overdueAmount ?? 0)}
+              Total Overdue: {fmt(data.overdueAmount ?? data.agingBreakdown.total ?? 0)}
             </div>
           </div>
 
@@ -278,11 +278,11 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {data.collectionPriorities.map((item, idx) => (
+                  {data.collectionPriorities.map((item: any, idx: number) => (
                     <tr key={idx} className="hover:bg-white/[0.02]">
                       <td className="py-2.5 font-medium text-white">{item.customerName}</td>
-                      <td className="py-2.5 text-rose-300 font-semibold">{fmt(item.overdueAmount)}</td>
-                      <td className="py-2.5 text-white/60">{item.daysOverdue}d</td>
+                      <td className="py-2.5 text-rose-300 font-semibold">{fmt(item.overdueAmount ?? item.outstandingBalance ?? 0)}</td>
+                      <td className="py-2.5 text-white/60">{item.daysOverdue ?? 0}d</td>
                       <td className="py-2.5">
                         <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-500/20 text-rose-300">
                           {item.priority}
@@ -421,12 +421,12 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
-                  {data.recentPayments.map((p) => (
+                  {data.recentPayments.map((p: any) => (
                     <tr key={p.id} className="hover:bg-white/[0.02] transition-colors">
                       <td className="px-5 py-3 font-medium text-white">{p.customerName}</td>
                       <td className="px-5 py-3 font-mono text-white/60">{p.invoiceNumber}</td>
                       <td className="px-5 py-3 text-emerald-400 font-semibold">{fmt(p.amount)}</td>
-                      <td className="px-5 py-3 text-white/50">{new Date(p.paymentDate).toLocaleDateString('en-IN')}</td>
+                      <td className="px-5 py-3 text-white/50">{new Date(p.paymentDate || p.paidAt || Date.now()).toLocaleDateString('en-IN')}</td>
                     </tr>
                   ))}
                 </tbody>

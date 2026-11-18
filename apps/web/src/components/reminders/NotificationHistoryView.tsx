@@ -105,6 +105,13 @@ export function NotificationHistoryView() {
     }
   }
 
+  const handleRetry = async (n: Notification) => {
+    await handleOpenDispatch()
+    setDispatchCustomer(n.customerId)
+    setDispatchChannel(n.channel)
+    setDispatchTemplate(n.template || 'PAYMENT_REMINDER_OVERDUE')
+  }
+
   const handleSendDispatch = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!dispatchCustomer) {
@@ -201,20 +208,21 @@ export function NotificationHistoryView() {
                 <th className="px-5 py-3">Status</th>
                 <th className="px-5 py-3">Details / Reason</th>
                 <th className="px-5 py-3">Date</th>
+                <th className="px-5 py-3 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-white/5">
               {loading ? (
                 Array.from({ length: 5 }).map((_, i) => (
                   <tr key={i}>
-                    <td colSpan={6} className="px-5 py-3.5">
+                    <td colSpan={7} className="px-5 py-3.5">
                       <div className="h-4 rounded animate-pulse bg-white/5" style={{ width: '80%' }} />
                     </td>
                   </tr>
                 ))
               ) : notifications.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-5 py-10 text-center text-white/40">
+                  <td colSpan={7} className="px-5 py-10 text-center text-white/40">
                     No notification history records found for the selected filters.
                   </td>
                 </tr>
@@ -229,9 +237,11 @@ export function NotificationHistoryView() {
                       {n.template || 'CUSTOM_MESSAGE'}
                     </td>
                     <td className="px-5 py-3.5">{statusBadge(n.status)}</td>
-                    <td className="px-5 py-3.5 text-white/60 max-w-xs truncate" title={(n as any).suppressionReason || (n as any).error || ''}>
+                    <td className="px-5 py-3.5 text-white/60 max-w-xs truncate" title={(n as any).suppressionReason || (n as any).failReason || (n as any).error || ''}>
                       {(n as any).suppressionReason ? (
                         <span className="text-amber-300/80 font-medium">{(n as any).suppressionReason}</span>
+                      ) : (n as any).failReason ? (
+                        <span className="text-rose-300/80 font-medium">{(n as any).failReason}</span>
                       ) : (n as any).error ? (
                         <span className="text-rose-300/80">{(n as any).error}</span>
                       ) : (
@@ -245,6 +255,20 @@ export function NotificationHistoryView() {
                         hour: '2-digit',
                         minute: '2-digit',
                       })}
+                    </td>
+                    <td className="px-5 py-3.5 text-right">
+                      {n.status === 'FAILED' ? (
+                        <button
+                          type="button"
+                          onClick={() => handleRetry(n)}
+                          className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-white transition-colors cursor-pointer"
+                          title="Open notification dispatch to retry sending"
+                        >
+                          ↻ Retry
+                        </button>
+                      ) : (
+                        <span className="text-white/20">—</span>
+                      )}
                     </td>
                   </tr>
                 ))

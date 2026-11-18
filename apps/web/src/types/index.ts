@@ -105,6 +105,8 @@ export interface FollowUpTask {
   collectionCase?: {
     customer?: { id: string; name: string; phone?: string; company?: string }
   }
+  customer?: { id: string; name: string; phone?: string; company?: string }
+  assignedTo?: string
   assignedAgent?: { id: string; name: string }
   createdAt?: string
 }
@@ -280,6 +282,7 @@ export interface DashboardStats {
     d90plus: number
     thresholdOverdueAmount: number
     thresholdDays: number
+    total?: number
   }
   recentPayments?: Array<{
     id: string

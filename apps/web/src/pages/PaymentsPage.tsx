@@ -62,8 +62,12 @@ export default function PaymentsPage() {
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
   const [verifyTarget, setVerifyTarget] = useState<Payment | null>(null)
   const [verifyError, setVerifyError] = useState<string | null>(null)
+  const [rejectingId, setRejectingId] = useState<string | null>(null)
+  const [rejectTarget, setRejectTarget] = useState<Payment | null>(null)
+  const [rejectError, setRejectError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const verifyInFlightRef = useRef(false)
+  const rejectInFlightRef = useRef(false)
   const [recordError, setRecordError] = useState<string | null>(null)
 
   const fetcher = useCallback(
@@ -178,6 +182,28 @@ export default function PaymentsPage() {
     }
   }
 
+  const handleConfirmRejectClaim = async () => {
+    if (!rejectTarget || rejectInFlightRef.current) return
+    rejectInFlightRef.current = true
+    setRejectingId(rejectTarget.id)
+    setRejectError(null)
+    setActionError(null)
+    try {
+      await paymentsApi.rejectPaymentClaim(rejectTarget.id)
+      toast.success(`Payment claim ${rejectTarget.ref} rejected. Invoice balance unchanged.`)
+      setRejectTarget(null)
+      setRefreshKey((k) => k + 1)
+    } catch (err: unknown) {
+      const msg = extractSafeErrorMessage(err, 'Failed to reject payment claim.')
+      setRejectError(msg)
+      setActionError(msg)
+      toast.error(msg)
+    } finally {
+      setRejectingId(null)
+      rejectInFlightRef.current = false
+    }
+  }
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <PageHeader
@@ -284,17 +310,30 @@ export default function PaymentsPage() {
                       </td>
                       <td className="px-5 py-3.5">
                         {!isAgent && isPending ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setVerifyError(null)
-                              setVerifyTarget(p)
-                            }}
-                            disabled={verifyingId === p.id}
-                            className="px-2.5 py-1 rounded text-xs font-semibold bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30 cursor-pointer transition-colors"
-                          >
-                            {verifyingId === p.id ? 'Verifying…' : '✓ Verify Claim'}
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setVerifyError(null)
+                                setVerifyTarget(p)
+                              }}
+                              disabled={verifyingId === p.id || rejectingId === p.id}
+                              className="px-2.5 py-1 rounded text-xs font-semibold bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30 cursor-pointer transition-colors"
+                            >
+                              {verifyingId === p.id ? 'Verifying…' : '✓ Verify Claim'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRejectError(null)
+                                setRejectTarget(p)
+                              }}
+                              disabled={verifyingId === p.id || rejectingId === p.id}
+                              className="px-2.5 py-1 rounded text-xs font-semibold bg-rose-600/20 hover:bg-rose-600/40 text-rose-300 border border-rose-500/30 cursor-pointer transition-colors"
+                            >
+                              {rejectingId === p.id ? 'Rejecting…' : '✕ Reject'}
+                            </button>
+                          </div>
                         ) : (
                           <span className="text-white/30 text-xs">—</span>
                         )}
@@ -483,6 +522,25 @@ export default function PaymentsPage() {
           setVerifyError(null)
         }}
         onConfirm={handleConfirmVerifyClaim}
+      />
+
+      <ConfirmDialog
+        open={Boolean(rejectTarget)}
+        title="Reject Payment Claim"
+        description={
+          rejectTarget
+            ? `Reject payment claim ${rejectTarget.ref} (${fmt(Number(rejectTarget.amount))})? The claim will be marked as rejected. The invoice balance and customer ledger will remain completely unchanged.`
+            : ''
+        }
+        confirmLabel="Reject Claim"
+        variant="danger"
+        loading={Boolean(rejectTarget && rejectingId === rejectTarget.id)}
+        errorMessage={rejectError}
+        onCancel={() => {
+          setRejectTarget(null)
+          setRejectError(null)
+        }}
+        onConfirm={handleConfirmRejectClaim}
       />
     </div>
   )

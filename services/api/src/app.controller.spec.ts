@@ -89,6 +89,82 @@ describe('AppController', () => {
       expect(res.promisesToPay).toEqual([]);
       expect(res.pendingCallbacks).toEqual([]);
     });
+
+    it('should map recentPayments, collectionPriorities, and hydrate pendingCallbacks customer name', async () => {
+      const now = new Date();
+      const pastDue = new Date(now.getTime() - 10 * 86_400_000);
+
+      mockPrisma.payment.findMany.mockResolvedValueOnce([
+        {
+          id: 'pmt-1',
+          ref: 'PAY-100',
+          amount: 2500,
+          method: 'UPI',
+          paidAt: now,
+          customer: { name: 'Acme Corp' },
+          invoice: { number: 'INV-100' },
+        },
+      ]);
+
+      mockPrisma.collectionCase.findMany.mockImplementation(async (args: any) => {
+        if (args?.select?.id) return [];
+        return [
+          {
+            id: 'case-1',
+            caseNumber: 'CASE-001',
+            priority: 'HIGH',
+            status: 'OPEN',
+            customer: { id: 'cust-1', name: 'Acme Corp', outstandingBalance: 15000 },
+            invoice: { id: 'inv-1', dueDate: pastDue, outstanding: 12000 },
+          },
+        ];
+      });
+
+      mockPrisma.followUpTask = {
+        findMany: vi.fn().mockResolvedValueOnce([
+          {
+            id: 'task-1',
+            title: 'Call client',
+            dueDate: now,
+            priority: 'HIGH',
+            customerId: 'cust-2',
+            collectionCase: null,
+          },
+        ]),
+      };
+
+      mockPrisma.customer.findMany = vi.fn().mockResolvedValueOnce([
+        { id: 'cust-2', name: 'Hydrated Customer Ltd' },
+      ]);
+
+      const res = await appController.dashboard(mockUser);
+      expect(res.recentPayments[0]).toMatchObject({
+        id: 'pmt-1',
+        ref: 'PAY-100',
+        reference: 'PAY-100',
+        amount: 2500,
+        currency: 'INR',
+        paidAt: now,
+        paymentDate: now,
+        customerName: 'Acme Corp',
+        invoiceNumber: 'INV-100',
+      });
+
+      expect(res.collectionPriorities[0]).toMatchObject({
+        id: 'case-1',
+        caseNumber: 'CASE-001',
+        customerName: 'Acme Corp',
+        outstandingBalance: 15000,
+        overdueAmount: 12000,
+        daysOverdue: 10,
+      });
+
+      expect(res.pendingCallbacks[0]).toMatchObject({
+        id: 'task-1',
+        title: 'Call client',
+        customerName: 'Hydrated Customer Ltd',
+      });
+    });
   });
 
   describe('dashboard preferences', () => {
