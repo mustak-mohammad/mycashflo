@@ -1,0 +1,16 @@
+node_modules
+*/node_modules
+*/*/node_modules
+.git
+.gitignore
+.vscode
+dist
+*/dist
+*/*/dist
+.env
+.env.*
+!.env.example
+*.log
+scratch
+docs
+apps

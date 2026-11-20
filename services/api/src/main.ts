@@ -101,9 +101,9 @@ async function bootstrap() {
   // Graceful shutdown hooks for persistent Node.js service (SIGTERM / SIGINT)
   app.enableShutdownHooks();
 
-  await app.listen(port);
-  Logger.log(`🚀 myCashflo API running on http://localhost:${port}/api`, 'Bootstrap');
-  Logger.log(`📖 Swagger docs available at http://localhost:${port}/api/docs`, 'Bootstrap');
+  await app.listen(port, '0.0.0.0');
+  Logger.log(`🚀 myCashflo API running on http://0.0.0.0:${port}/api`, 'Bootstrap');
+  Logger.log(`📖 Swagger docs available at http://0.0.0.0:${port}/api/docs`, 'Bootstrap');
 }
 
 await bootstrap();
